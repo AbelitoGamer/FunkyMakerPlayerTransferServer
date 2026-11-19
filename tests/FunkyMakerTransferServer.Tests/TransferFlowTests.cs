@@ -37,6 +37,13 @@ public sealed class TransferFlowTests : IDisposable
         Assert.False(byHash[onlyB.Hash].YouHave);
         Assert.Equal(1, byHash[onlyB.Hash].OthersHave);
         Assert.Equal("OnlyB", byHash[onlyB.Hash].Name);
+
+        // Who has what: A sees B in the player list and as the holder of Shared and OnlyB.
+        var other = Assert.Single(state.Players);
+        Assert.Equal("B", other.Username);
+        Assert.Equal(other.Id, Assert.Single(byHash[shared.Hash].Holders));
+        Assert.Equal(other.Id, Assert.Single(byHash[onlyB.Hash].Holders));
+        Assert.Empty(byHash[onlyA.Hash].Holders);
     }
 
     [Fact]

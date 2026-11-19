@@ -100,6 +100,7 @@ public sealed partial class RoomRegistry
             var member = new Member(connectionId, playerId, CleanName(request.Username, "Player"), room)
             {
                 Levels = SanitizeLevels(request.Levels),
+                ColorHue = Math.Clamp(request.ColorHue, 0, 360),
             };
             room.Members.Add(member);
             _members[connectionId] = member;
@@ -540,6 +541,7 @@ public sealed partial class RoomRegistry
             {
                 bool youHave = member.Levels.TryGetValue(hash, out var own);
                 var src = own ?? entry;
+                var holders = room.Members.Where(o => o != member && o.Levels.ContainsKey(hash)).Select(o => o.PublicId).ToList();
                 levels.Add(new RoomLevel
                 {
                     Hash = hash,
@@ -547,13 +549,19 @@ public sealed partial class RoomRegistry
                     FileName = src.FileName,
                     Size = src.Size,
                     YouHave = youHave,
-                    OthersHave = room.Members.Count(o => o != member && o.Levels.ContainsKey(hash)),
+                    OthersHave = holders.Count,
                     Waiting = waiting.GetValueOrDefault(hash),
+                    Holders = holders,
                 });
             }
             fx.Send(member.ConnectionId, Protocol.RoomState, new RoomStatePacket
             {
-                RoomCode = room.Code, Members = room.Members.Count, Levels = levels,
+                RoomCode = room.Code,
+                Members = room.Members.Count,
+                Levels = levels,
+                Players = room.Members.Where(o => o != member)
+                    .Select(o => new RoomPlayer { Id = o.PublicId, Username = o.Username, ColorHue = o.ColorHue })
+                    .ToList(),
             });
 
             var q = new QueueStatePacket();
@@ -656,6 +664,9 @@ public sealed partial class RoomRegistry
         public string Username { get; } = username;
         public Room Room { get; } = room;
         public Dictionary<string, LevelEntry> Levels { get; set; } = new();
+        public int ColorHue { get; set; } = 180;
+        /// <summary>Id shown to other players: the PlayerId, or the connection id when none was sent.</summary>
+        public string PublicId => PlayerId.Length > 0 ? PlayerId : ConnectionId;
         public string? QueueHash { get; set; }
         public long QueueSeq { get; set; }
         public Transfer? Transfer { get; set; }

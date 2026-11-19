@@ -43,6 +43,8 @@ public sealed class JoinRoomRequest
     public string RoomCode { get; set; } = "";
     public string PlayerId { get; set; } = "";
     public string Username { get; set; } = "";
+    /// <summary>Leaderboard color hue (0-360), shown as the player's square next to levels.</summary>
+    public int ColorHue { get; set; } = 180;
     public string ClientVersion { get; set; } = "";
     public int ProtocolVersion { get; set; }
     public List<LevelEntry> Levels { get; set; } = new();
@@ -75,6 +77,17 @@ public sealed class RoomLevel
     public int OthersHave { get; set; }
     /// <summary>How many players (including you) are queued for this level.</summary>
     public int Waiting { get; set; }
+    /// <summary>Ids (<see cref="RoomPlayer.Id"/>) of the other players who have this exact file.</summary>
+    public List<string> Holders { get; set; } = new();
+}
+
+/// <summary>Another player in the room.</summary>
+public sealed class RoomPlayer
+{
+    /// <summary>Stable id within the room (the player's PlayerId).</summary>
+    public string Id { get; set; } = "";
+    public string Username { get; set; } = "";
+    public int ColorHue { get; set; } = 180;
 }
 
 public sealed class RoomStatePacket
@@ -82,6 +95,8 @@ public sealed class RoomStatePacket
     public string RoomCode { get; set; } = "";
     public int Members { get; set; }
     public List<RoomLevel> Levels { get; set; } = new();
+    /// <summary>The other players in the room (not you), in join order.</summary>
+    public List<RoomPlayer> Players { get; set; } = new();
 }
 
 public sealed class QueueStatePacket
