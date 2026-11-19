@@ -16,6 +16,7 @@ builder.Services.AddSingleton(TimeProvider.System);
 builder.Services.AddSingleton<RoomRegistry>();
 builder.Services.AddSingleton<TransferStore>();
 builder.Services.AddSingleton<EffectRunner>();
+builder.Services.AddSingleton<ReplayExchange>();
 builder.Services.AddHostedService<SweepService>();
 
 builder.Services.AddSignalR(o =>
@@ -71,6 +72,10 @@ app.MapHub<TransferHub>("/transfer");
 var api = app.MapGroup("/api/transfers").RequireRateLimiting("api");
 api.MapPut("/{id}/file", TransferEndpoints.UploadAsync);
 api.MapGet("/{id}/file", TransferEndpoints.DownloadAsync);
+
+var replays = app.MapGroup("/api/replays").RequireRateLimiting("api");
+replays.MapPut("/", ReplayExchange.PutAsync);
+replays.MapGet("/", ReplayExchange.Get);
 
 app.Run();
 
