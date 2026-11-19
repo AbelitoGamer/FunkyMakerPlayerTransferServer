@@ -1,0 +1,14 @@
+# Render Blueprint: New > Blueprint > pick this repo.
+services:
+  - type: web
+    name: funkymaker-transfer
+    runtime: docker
+    plan: free
+    dockerfilePath: ./Dockerfile
+    healthCheckPath: /health
+    autoDeploy: true
+    envVars:
+      - key: Transfer__MaxUploadMegabytes
+        value: "100"
+      - key: Transfer__MaxRoomMembers
+        value: "16"

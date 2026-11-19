@@ -1,0 +1,8 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/FunkyMakerTransferServer/FunkyMakerTransferServer.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/FunkyMakerTransferServer.Tests/FunkyMakerTransferServer.Tests.csproj" />
+  </Folder>
+</Solution>
