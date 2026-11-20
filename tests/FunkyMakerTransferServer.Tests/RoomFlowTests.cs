@@ -396,6 +396,36 @@ public sealed class RoomFlowTests : IDisposable
     }
 
     [Fact]
+    public async Task Exit_match_marks_the_player_as_left_and_announces_it()
+    {
+        var lvl = TestLevel.Create("Lvl");
+        await using var a = await TestPlayer.ConnectAsync(_factory, "A", lvl);
+        await using var b = await TestPlayer.ConnectAsync(_factory, "B", lvl);
+        await using var c = await TestPlayer.ConnectAsync(_factory, "C", lvl);
+        string id = await a.CreateAsync(new RoomSettings { Mode = Protocol.ModeMirror, MaxPlayers = 3 });
+        await b.JoinAsync(id);
+        await c.JoinAsync(id);
+        Assert.True((await a.PickLocalAsync(lvl)).Ok);
+        await b.ReadyAsync();
+        await c.ReadyAsync();
+        var info = await a.WaitFor<MatchInfo>(Protocol.MatchLoading);
+        foreach (var p in new[] { a, b, c }) await p.Hub.InvokeAsync("MatchLoaded", info.MatchId);
+        await a.WaitFor<MatchStartPacket>(Protocol.MatchStart);
+
+        // B quits with a high score: announced, and ranked last as "left".
+        await b.Hub.InvokeAsync("FinishMatch", new FinishMatchRequest { MatchId = info.MatchId, Score = 99999, Quit = true });
+        await a.WaitChat("B left the match");
+        Assert.Empty(a.All<RoundResult>(Protocol.MatchResults)); // the others are still playing
+        await a.Hub.InvokeAsync("FinishMatch", new FinishMatchRequest { MatchId = info.MatchId, Score = 500 });
+        await c.Hub.InvokeAsync("FinishMatch", new FinishMatchRequest { MatchId = info.MatchId, Score = 400 });
+        var result = await a.WaitFor<RoundResult>(Protocol.MatchResults);
+        var bRes = result.Players.Single(p => p.Username == "B");
+        Assert.True(bRes.Disconnected);
+        Assert.Equal("B", result.Players[^1].Username);
+        Assert.Equal("A", result.Players[0].Username);
+    }
+
+    [Fact]
     public async Task Mid_match_joiner_spectates_and_gets_the_level()
     {
         var lvl = TestLevel.Create("Lvl");

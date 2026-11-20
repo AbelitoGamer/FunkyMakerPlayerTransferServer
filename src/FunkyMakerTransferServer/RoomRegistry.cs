@@ -55,8 +55,8 @@ public sealed partial class RoomRegistry
     public static readonly TimeSpan ChatInterval = TimeSpan.FromMilliseconds(300);
     public const int MaxChatHistory = 60;
     public const int MaxRoundHistory = 50;
-    /// <summary>Countdown the clients show between "everybody loaded" and the song start.</summary>
-    public const int CountdownMs = 3000;
+    /// <summary>Countdown the clients show between "everybody loaded" and the song start (4 beats at 60 BPM).</summary>
+    public const int CountdownMs = 4000;
 
     private readonly object _lock = new();
     private readonly Dictionary<string, Session> _sessions = new(StringComparer.Ordinal);
@@ -588,7 +588,15 @@ public sealed partial class RoomRegistry
             if (match == null || match.Info.MatchId != request.MatchId || room.Phase != Protocol.PhasePlaying) return;
             if (!match.Participants.TryGetValue(m.Session.PlayerId, out var p) || p.Final != null) return;
             p.Final = request;
-            match.FirstFinishAt ??= Now;
+            if (request.Quit)
+            {
+                p.Gone = true;
+                AddSystemChatLocked(room, $"{m.Session.Username} left the match.", fx);
+            }
+            else
+            {
+                match.FirstFinishAt ??= Now;
+            }
             if (match.Participants.Values.All(x => x.Final != null || x.Gone))
                 FinishRoundLocked(room, fx);
         }
@@ -895,6 +903,7 @@ public sealed partial class RoomRegistry
             else
             {
                 p.Gone = true;
+                AddSystemChatLocked(room, $"{member.Session.Username} left the match.", fx);
                 if (room.Match.Participants.Values.All(x => x.Final != null || x.Gone))
                     FinishRoundLocked(room, fx);
             }
@@ -1162,7 +1171,7 @@ public sealed partial class RoomRegistry
             {
                 PlayerId = p.Assignment.PlayerId, Username = name, ColorHue = hue,
                 Side = p.Assignment.Side, Team = p.Assignment.Team,
-                Disconnected = p.Gone && p.Final == null,
+                Disconnected = p.Gone && (p.Final == null || p.Final.Quit),
             };
             if (p.Final != null)
             {

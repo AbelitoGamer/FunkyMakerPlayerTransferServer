@@ -386,6 +386,8 @@ public sealed class PlayerStatePacket
     public int Misses { get; set; }
     /// <summary>Song time (s) of the sender.</summary>
     public float SongTime { get; set; }
+    /// <summary>The sender quit the match (Exit Match); their score is final.</summary>
+    public bool Left { get; set; }
 }
 
 public sealed class PlayerHitPacket
@@ -416,4 +418,6 @@ public sealed class FinishMatchRequest
     public int Bads { get; set; }
     public int Shits { get; set; }
     public int MaxCombo { get; set; }
+    /// <summary>Left before the song ended (Exit Match): ranked last like a disconnect.</summary>
+    public bool Quit { get; set; }
 }
