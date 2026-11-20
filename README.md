@@ -63,6 +63,20 @@ return; the client buffers them.
 | `GET /api/verified_levels`, `/api/verified_levels/{id}/download` | Official levels. |
 | `PUT/GET /api/transfers/{id}/file` | Level transfers. |
 | `PUT/GET /api/replays` | Replay tracks. |
+| `GET /api/testing` | Test-build gate: `{"open": bool, "message": string}`. |
+
+## Test-build gate (config section `Testing`, env vars `Testing__Name`)
+
+Player builds made with `-p:FunkyTestBuild=true` only start while this says open.
+Normal player builds never ask.
+
+| Setting | Default | |
+|---|---|---|
+| `Open` | true | `false` closes testing: test builds show "testing is closed" and can't be played. |
+| `Message` | "" | Shown to players when closed (empty = the client's default text). |
+
+On Render: set `Testing__Open=false` (and optionally `Testing__Message`) in the service's
+Environment tab; saving redeploys the service.
 
 ## Limits (config section `Transfer`, env vars `Transfer__Name`)
 

@@ -15,6 +15,7 @@ if (!string.IsNullOrWhiteSpace(port))
     builder.WebHost.UseUrls($"http://0.0.0.0:{port}");
 
 builder.Services.Configure<TransferOptions>(builder.Configuration.GetSection("Transfer"));
+builder.Services.Configure<TestingOptions>(builder.Configuration.GetSection("Testing"));
 builder.Services.AddSingleton(TimeProvider.System);
 
 // Official server services (leaderboard persistence: MongoDB when MONGODB_URI is set, else local JSON).
@@ -80,6 +81,14 @@ app.MapGet("/health", (RoomRegistry registry) => Results.Ok(new
     maxUploadBytes = registry.MaxUploadBytes,
     stats = registry.GetStats(),
 }));
+
+// Test-build gate (see TestingOptions): test clients refuse to start unless this says open.
+app.MapGet("/api/testing", (HttpContext ctx, IOptionsMonitor<TestingOptions> testing) =>
+{
+    ctx.Response.Headers.CacheControl = "no-store";
+    var t = testing.CurrentValue;
+    return Results.Ok(new { open = t.Open, message = t.Message ?? "" });
+});
 
 app.MapControllers();
 app.MapHub<RoomHub>("/multiplayer");

@@ -12,3 +12,8 @@ services:
         value: "100"
       - key: Transfer__MaxRoomMembers
         value: "16"
+      # Test-build gate: set to "false" to close testing (test builds then refuse to start)
+      - key: Testing__Open
+        value: "true"
+      - key: Testing__Message
+        value: ""
