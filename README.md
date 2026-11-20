@@ -1,90 +1,108 @@
-# FunkyMaker Transfer Server
+# FunkyMaker Online Server
 
-Small ASP.NET Core (.NET 10) server that lets players in a **FunkyMakerPlayer private room** send
-each other local levels. It is separate from the main game server and never talks to it: once a
-level has been transferred, the game server only sees an ordinary private match.
+ASP.NET Core (.NET 10) server for FunkyMakerPlayer's online mode (room system, protocol 2). It merges
+the official game server (leaderboard, users, verified levels) with this repo's level transfers and
+replay exchange, and adds rooms:
 
-## How it works
+- **Room browser**: name, open / password, mode, song being played (+ stars), host, players / max.
+- **Rooms** (2-8 players): host (first in the list; the next player takes over if they leave), chat,
+  kick (5 min ban), settings editable between rounds (announced in the chat).
+- **Settings**: game mode (Versus / Teams / Mirror), song selection (by turns / host only), password,
+  player limit, whether guests may pick their local levels.
+- **Rounds**: the player whose turn it is picks a song → everybody gets the level (official: download
+  from `/api/verified_levels`; local: one holder uploads it once, everybody who lacks it downloads it)
+  → players mark themselves ready (the picker is ready automatically, spectators don't count) →
+  the match loads → when every player has loaded, a synced start time is sent → players report their
+  result → the server ranks them, records the round and passes the turn on (spectators are skipped).
+- **Modes**: Versus (exactly 2 players, random sides), Teams (random split; the higher *average*
+  score wins), Mirror (everybody plays the same side, chosen by majority vote, ties random).
+- **Leaderboard**: pairwise ELO (K = 32 split over the comparisons; Teams compares only against the
+  other team). Disconnected players stay in the history but get no stats.
 
-1. When a player enters a private room, the game hashes their local levels (SHA-256) and calls
-   `JoinRoom` with the room code and the list `{hash, name, fileName, size}`.
-2. The server sends every member a personal view of the room (`RoomState`): every level anyone has,
-   with `youHave`, `othersHave` and `waiting`. The game shows your levels as **READY** (someone else
-   has the same file) or **ONLY YOU**, plus other players' levels as **DOWNLOAD NEEDED**.
-3. Picking a level calls `JoinQueue(hash)`. Nothing is downloaded yet.
-4. The server pairs queued players for the same hash, oldest first, **only if at least one of the
-   two has the file**. Two players without it keep waiting until a player with it queues.
-5. Both have it: both get `MatchReady` right away. One has it: a transfer starts.
-   - `TransferStarted` goes to both (role `upload` / `download`, with a token for the HTTP endpoint).
-   - Uploader: `PUT /api/transfers/{id}/file`. The server checks size, ZIP/RAR signature and SHA-256.
-   - Downloader gets `ReadyToDownload` and does `GET /api/transfers/{id}/file`.
-   - `TransferProgress` (phase `upload` → `download` → `verify`) goes to both players, so each sees
-     "Uploading / Opponent uploading / Downloading / Opponent downloading – N%".
-   - The downloader checks the hash and calls `CompleteTransfer(id, ok)`.
-6. `MatchReady` carries a **fresh 6-character code unique to the pair**. Both clients call the game
-   server's `FindMatch` with that code, so other people in the same room can't take the slot.
+## Layout
 
-Uploaded files are kept for the room for `CacheMinutes` after their last use, so the next player
-who needs the same level is served from the cache without a new upload. Files are on temporary
-disk and the room state is in memory, so a restart just means players re-enter the room.
-
-Cancellation rules: if your partner leaves, cancels or disconnects, you go back into the queue in
-your old position (`Requeued = true`). Bad uploads, failed verification and stalls longer than
-`StallTimeoutSeconds` cancel the transfer for both players.
-
-## Endpoints
-
-| Path | Purpose |
+| Path | |
 |---|---|
-| `GET /health` | Status, protocol version, limits, counters. Also wakes a sleeping instance. |
-| `/transfer` | SignalR hub (`JoinRoom`, `UpdateLevels`, `LeaveRoom`, `JoinQueue`, `LeaveQueue`, `CompleteTransfer`). |
-| `PUT /api/transfers/{id}/file` | Upload (header `X-Transfer-Token`). |
-| `GET /api/transfers/{id}/file` | Download (header `X-Transfer-Token`). |
+| `src/FunkyMakerTransferServer/Protocol.cs` | Wire types. The game has a copy in `FunkyMakerPlayer/Multiplayer/Rooms/RoomProtocol.cs`; keep them in sync and bump `Protocol.Version` on breaking changes (the server refuses other versions in `Hello` with "Update the game"). |
+| `RoomRegistry.cs` | All session / room / round / match / transfer state behind one lock; side effects (`Effects`) run after it is released. |
+| `RoomHub.cs` | SignalR hub `/multiplayer`. |
+| `TransferEndpoints.cs` | `PUT` / `GET /api/transfers/{id}/file` (token header `X-Transfer-Token`). |
+| `ReplayExchange.cs` | `PUT` / `GET /api/replays` (online replay tracks). |
+| `Official/` | Copied from the official server (namespace `FunkyMakerServer.*`): leaderboard (MongoDB when `MONGODB_URI` is set, else JSON in `FUNKYMAKER_DATA_DIR`), users, verified levels, `/api/server/info`. `LeaderboardService.RecordRound` is new (N players, pairwise ELO). |
+| `verified_levels/` | Official levels (copied from the official server). |
 
-The wire types are in `src/FunkyMakerTransferServer/Protocol.cs`. The game has a copy in
-`FunkyMakerPlayer/Multiplayer/Transfer/TransferProtocol.cs`; keep them in sync and bump
-`Protocol.Version` for breaking changes (the server rejects other versions with a clear message).
+## Hub methods (client → server)
+
+`Hello`, `Ping`, `ListRooms`, `CreateRoom`, `JoinRoom`, `LeaveRoom`, `UpdateLevels`, `UpdateSettings`
+(host), `Kick` (host), `SendChat`, `SetSpectate`, `SelectSong` (turn player), `SetReady`,
+`SetLevelStatus`, `VoteSide` (Mirror), `CompleteDownload`, `MatchLoaded`, `SendState`, `SendHit`,
+`SendKeyPress`, `FinishMatch`, `GetLeaderboard`, `GetMatchHistory`.
+
+Server → client: `RoomState` (full, personalised view; `Levels` / `History` are null when unchanged),
+`Chat`, `Kicked`, `TransferUpload`, `TransferDownload`, `TransferFailed`, `MatchLoading`, `MatchStart`,
+`MatchResults`, `PlayerState`, `PlayerHit`, `PlayerKeyPress`, `Pong`, `LeaderboardResponse`,
+`MatchHistoryResponse`.
+
+Note: the server sends the first `RoomState` and the chat history *before* `CreateRoom` / `JoinRoom`
+return; the client buffers them.
+
+## Timeouts
+
+| | |
+|---|---|
+| Loading | 60 s; players who haven't loaded become spectators (round cancelled if fewer than 2 remain). |
+| Finishing | 30 s after the first player finishes; missing players are ranked with their last live state. |
+| Transfers | `StallTimeoutSeconds` (60) without progress; a failed upload tries the next holder. |
+
+## HTTP
+
+| Path | |
+|---|---|
+| `GET /health` | Status, protocol, limits, counters. Also wakes a sleeping instance. |
+| `GET /api/server/info`, `/api/leaderboard`, `/api/users`, `/api/users/{id}` | Official server API. |
+| `GET /api/verified_levels`, `/api/verified_levels/{id}/download` | Official levels. |
+| `PUT/GET /api/transfers/{id}/file` | Level transfers. |
+| `PUT/GET /api/replays` | Replay tracks. |
 
 ## Limits (config section `Transfer`, env vars `Transfer__Name`)
 
 | Setting | Default | |
 |---|---|---|
 | `MaxUploadMegabytes` | 100 | Levels larger than this are not listed or accepted. |
-| `MaxRoomMembers` | 16 | |
 | `MaxLevelsPerMember` | 2000 | |
-| `StallTimeoutSeconds` | 60 | No progress for this long cancels a transfer. |
-| `CacheMinutes` | 15 | |
-| `ProgressIntervalMs` | 200 | Progress packet throttle. |
-| `HttpRequestsPerMinute` | 60 | Per IP, on `/api`. |
+| `StallTimeoutSeconds` | 60 | |
+| `CacheMinutes` | 15 | Uploaded levels stay reusable in the room this long. |
+| `ProgressIntervalMs` | 200 | Room state throttle while downloading. |
+| `HttpRequestsPerMinute` | 60 | Per IP, on `/api/transfers` and `/api/replays`. |
 | `StorageDirectory` | temp | Wiped on start. |
 
-## Run locally
+## Run / test locally
 
 ```powershell
-dotnet run --project src/FunkyMakerTransferServer      # http://0.0.0.0:5000
-dotnet test                                             # 20 tests, real in-process server
+dotnet test                                              # 24 tests, real in-process server
+$env:PORT = "5097"; dotnet run --project src/FunkyMakerTransferServer
 ```
 
-Point the game at it without touching settings:
+Point the game at it without touching settings, and give each window its own profile (separate
+PlayerId / name / colour) to test two players on one PC:
 
 ```powershell
-$env:FUNKYMAKER_TRANSFER_URL = "http://127.0.0.1:5000"
-dotnet run --project FunkyMakerPlayer\FunkyMakerPlayer.csproj -f net10.0 /p:TargetFrameworks=net10.0
+$env:FUNKYMAKER_SERVER_URL = "http://127.0.0.1:5097"
+$env:FUNKYMAKER_MP_PROFILE = "p2"     # second window only
+dotnet run --project FunkyMakerPlayer\FunkyMakerPlayer.csproj -f net10.0 -p:TargetFrameworks=net10.0
 ```
 
-To test with someone on another PC on your LAN, use your LAN IP instead of 127.0.0.1 (allow port
-5000 through the Windows firewall). Alternatively set `"TransferServerUrl"` in
-`%AppData%\FunkyMakerPlayer\multiplayer_settings.json`.
+The game's default server is `https://funkymaker-transfer.onrender.com` (this repo on Render);
+`"ServerUrl"` in `%AppData%\FunkyMakerPlayer\multiplayer_settings.json` overrides it.
 
 ## Deploy on Render
 
-1. Push this repo to GitHub.
-2. Render dashboard → **New → Blueprint** → pick the repo. `render.yaml` creates a free Docker web
-   service called `funkymaker-transfer` with `/health` as its health check.
-3. Its URL will be `https://funkymaker-transfer.onrender.com` if the name is free, which is the
-   game's default. If Render gives a different URL, set `TransferServerUrl` in the game's
-   `multiplayer_settings.json` (or change `LevelTransferClient.DefaultServerUrl` in the game).
+`render.yaml` creates a free Docker web service (`funkymaker-transfer`, health check `/health`,
+auto-deploy on push to `main`). For a persistent leaderboard set `MONGODB_URI` (and optionally
+`MONGODB_DB`); without it the JSON files are lost when the instance restarts.
 
-Free instances sleep after a period of inactivity and take a while to wake up; the game waits up
-to ~100 s when connecting. Check Render's current free-tier bandwidth and hour limits before
-relying on it for many players.
+## Moving this into the official server repo
+
+Copy `src/FunkyMakerTransferServer/` (rename the project if you like), `tests/`, `Dockerfile` and
+`render.yaml`. The official repo's `Hubs/MultiplayerHub.cs` (1v1 protocol) is replaced by `RoomHub`;
+old game builds can't use the new server ("Update the game").

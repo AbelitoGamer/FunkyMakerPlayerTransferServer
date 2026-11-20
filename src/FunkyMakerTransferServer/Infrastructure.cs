@@ -1,3 +1,5 @@
+using FunkyMakerServer.Models;
+using FunkyMakerServer.Services;
 using Microsoft.AspNetCore.SignalR;
 using Microsoft.Extensions.Options;
 
@@ -46,10 +48,15 @@ public sealed class TransferStore
 }
 
 /// <summary>Runs <see cref="Effects"/> outside the registry lock.</summary>
-public sealed class EffectRunner(IHubContext<TransferHub> hub, TransferStore store, ILogger<EffectRunner> log)
+public sealed class EffectRunner(IHubContext<RoomHub> hub, TransferStore store, LeaderboardService leaderboard, ILogger<EffectRunner> log)
 {
     public async Task RunAsync(Effects fx)
     {
+        foreach (var round in fx.RoundsToRecord)
+        {
+            try { leaderboard.RecordRound(round); }
+            catch (Exception ex) { log.LogError(ex, "Recording round {Id} failed", round.MatchId); }
+        }
         foreach (var cts in fx.ToCancel)
         {
             try { cts.Cancel(); } catch (ObjectDisposedException) { }
@@ -70,12 +77,12 @@ public sealed class EffectRunner(IHubContext<TransferHub> hub, TransferStore sto
     }
 }
 
-/// <summary>Every few seconds: time out stalled transfers and expire cached files.</summary>
+/// <summary>Every second: timeouts (transfers, loading, finishing) and cached file expiry.</summary>
 public sealed class SweepService(RoomRegistry registry, EffectRunner runner, ILogger<SweepService> log) : BackgroundService
 {
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
-        using var timer = new PeriodicTimer(TimeSpan.FromSeconds(5));
+        using var timer = new PeriodicTimer(TimeSpan.FromSeconds(1));
         while (await timer.WaitForNextTickAsync(stoppingToken))
         {
             try

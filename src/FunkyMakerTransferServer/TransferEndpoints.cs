@@ -10,7 +10,8 @@ namespace FunkyMakerTransferServer;
 /// <item><c>PUT /api/transfers/{id}/file</c> — uploader sends the raw file (header X-Transfer-Token).</item>
 /// <item><c>GET /api/transfers/{id}/file</c> — downloader receives it (header X-Transfer-Token).</item>
 /// </list>
-/// Both report byte progress to the registry, which relays it to both players.
+/// Both report byte progress to the registry, which shows it in the room (RoomState level progress).
+/// One upload per level; every player who lacks it downloads it with their own token.
 /// </summary>
 public static class TransferEndpoints
 {
@@ -66,7 +67,7 @@ public static class TransferEndpoints
                     await file.WriteAsync(buffer.AsMemory(0, n), linked.Token);
 
                     var fx = new Effects();
-                    registry.ReportBytes(id, Protocol.PhaseUpload, total, fx);
+                    registry.ReportUploadBytes(id, total, fx);
                     await runner.RunAsync(fx);
                 }
             }
@@ -150,15 +151,11 @@ public static class TransferEndpoints
                     await ctx.Response.Body.WriteAsync(buffer.AsMemory(0, n), linked.Token);
                     total += n;
                     var fx = new Effects();
-                    registry.ReportBytes(id, Protocol.PhaseDownload, total, fx);
+                    registry.ReportDownloadBytes(id, token, total, fx);
                     await runner.RunAsync(fx);
                 }
                 await ctx.Response.Body.FlushAsync(linked.Token);
             }
-
-            var sent = new Effects();
-            registry.DownloadSent(id, sent);
-            await runner.RunAsync(sent);
         }
         catch (OperationCanceledException)
         {

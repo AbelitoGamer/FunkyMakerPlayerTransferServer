@@ -1,8 +1,11 @@
-using System.Reflection;
 using System.Threading.RateLimiting;
+using FunkyMakerServer.Services;
 using FunkyMakerTransferServer;
 using Microsoft.AspNetCore.HttpOverrides;
 using Microsoft.Extensions.Options;
+
+// FunkyMaker online server: rooms + matches (SignalR /multiplayer), level transfers between players,
+// replay exchange, and the official game server's HTTP API (leaderboard, users, verified levels).
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -13,18 +16,30 @@ if (!string.IsNullOrWhiteSpace(port))
 
 builder.Services.Configure<TransferOptions>(builder.Configuration.GetSection("Transfer"));
 builder.Services.AddSingleton(TimeProvider.System);
+
+// Official server services (leaderboard persistence: MongoDB when MONGODB_URI is set, else local JSON).
+builder.Services.AddSingleton<HashService>();
+builder.Services.AddSingleton<LevelService>();
+builder.Services.AddSingleton<LeaderboardService>();
+builder.Services.AddHostedService(sp => sp.GetRequiredService<LeaderboardService>());
+builder.Services.AddSingleton<IOfficialLevels, OfficialLevelsAdapter>();
+
 builder.Services.AddSingleton<RoomRegistry>();
 builder.Services.AddSingleton<TransferStore>();
 builder.Services.AddSingleton<EffectRunner>();
 builder.Services.AddSingleton<ReplayExchange>();
 builder.Services.AddHostedService<SweepService>();
+builder.Services.AddControllers();
 
 builder.Services.AddSignalR(o =>
 {
     o.MaximumReceiveMessageSize = 1024 * 1024; // level lists can be a few hundred KB
     o.KeepAliveInterval = TimeSpan.FromSeconds(10);
     o.ClientTimeoutInterval = TimeSpan.FromSeconds(60);
+    o.EnableDetailedErrors = builder.Environment.IsDevelopment();
 });
+
+builder.Services.AddCors(o => o.AddPolicy("AllowAll", p => p.AllowAnyOrigin().AllowAnyMethod().AllowAnyHeader()));
 
 // Render terminates TLS in front of the app; trust its X-Forwarded-* headers for client IPs.
 builder.Services.Configure<ForwardedHeadersOptions>(o =>
@@ -53,21 +68,21 @@ builder.Services.AddRateLimiter(o =>
 var app = builder.Build();
 
 app.UseForwardedHeaders();
+app.UseCors("AllowAll");
 app.UseRateLimiter();
 
-string version = Assembly.GetExecutingAssembly().GetName().Version?.ToString(3) ?? "0.0.0";
-
-app.MapGet("/", () => Results.Text("FunkyMaker level transfer server. See /health."));
+app.MapGet("/", () => Results.Redirect("/api/server/info"));
 app.MapGet("/health", (RoomRegistry registry) => Results.Ok(new
 {
     status = "ok",
-    version,
+    version = ServerVersion.Value,
     protocol = Protocol.Version,
     maxUploadBytes = registry.MaxUploadBytes,
     stats = registry.GetStats(),
 }));
 
-app.MapHub<TransferHub>("/transfer");
+app.MapControllers();
+app.MapHub<RoomHub>("/multiplayer");
 
 var api = app.MapGroup("/api/transfers").RequireRateLimiting("api");
 api.MapPut("/{id}/file", TransferEndpoints.UploadAsync);

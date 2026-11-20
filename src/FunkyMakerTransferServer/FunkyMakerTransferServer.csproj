@@ -4,10 +4,22 @@
     <TargetFramework>net10.0</TargetFramework>
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
+    <Version>0.6.0</Version>
   </PropertyGroup>
 
   <ItemGroup>
+    <PackageReference Include="MongoDB.Driver" Version="3.14.0" />
+  </ItemGroup>
+
+  <ItemGroup>
     <InternalsVisibleTo Include="FunkyMakerTransferServer.Tests" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- Official levels served by /api/verified_levels (scanned at runtime). -->
+    <Content Include="verified_levels\**\*.*">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
   </ItemGroup>
 
 </Project>

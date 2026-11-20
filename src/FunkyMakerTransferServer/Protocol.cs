@@ -1,30 +1,115 @@
 namespace FunkyMakerTransferServer;
 
-// Wire types shared with the game client (FunkyMakerPlayer/Multiplayer/Transfer/TransferProtocol.cs).
-// Keep both files in sync and bump ProtocolVersion on breaking changes.
+// Wire types shared with the game client (FunkyMakerPlayer/Multiplayer/Rooms/RoomProtocol.cs).
+// Keep both files in sync and bump Protocol.Version on breaking changes: the server refuses
+// clients with a different version (Hello) with a clear "update the game" message.
 
 public static class Protocol
 {
-    public const int Version = 1;
+    /// <summary>2 = room system (room list, waiting room, turns, N players). 1 was the old pair-transfer server.</summary>
+    public const int Version = 2;
 
-    // Hub methods the server calls on clients.
+    // ── Server → client methods ──────────────────────────────────────────────
     public const string RoomState = "RoomState";
-    public const string QueueState = "QueueState";
-    public const string TransferStarted = "TransferStarted";
-    public const string TransferProgress = "TransferProgress";
-    public const string ReadyToDownload = "ReadyToDownload";
-    public const string TransferCancelled = "TransferCancelled";
-    public const string MatchReady = "MatchReady";
+    public const string Chat = "Chat";
+    public const string Kicked = "Kicked";
+    public const string TransferUpload = "TransferUpload";
+    public const string TransferDownload = "TransferDownload";
+    public const string TransferFailed = "TransferFailed";
+    public const string MatchLoading = "MatchLoading";
+    public const string MatchStart = "MatchStart";
+    public const string MatchResults = "MatchResults";
+    public const string PlayerState = "PlayerState";
+    public const string PlayerHit = "PlayerHit";
+    public const string PlayerKeyPress = "PlayerKeyPress";
+    public const string Pong = "Pong";
 
-    // Transfer roles / phases (strings on the wire).
-    public const string RoleUpload = "upload";
-    public const string RoleDownload = "download";
-    public const string PhaseUpload = "upload";
-    public const string PhaseDownload = "download";
-    public const string PhaseVerify = "verify";
+    // ── Enumerations (strings on the wire) ───────────────────────────────────
+    public const string ModeVersus = "versus";
+    public const string ModeTeams = "teams";
+    public const string ModeMirror = "mirror";
+
+    public const string SelectTurns = "turns";
+    public const string SelectHost = "host";
+
+    public const string SourceOfficial = "official";
+    public const string SourceLocal = "local";
+
+    public const string PhaseLobby = "lobby";           // waiting for the chooser to pick a song
+    public const string PhaseSongSelected = "selected"; // song picked, players getting the level / ready
+    public const string PhaseLoading = "loading";       // match players are loading the level
+    public const string PhasePlaying = "playing";
+
+    public const string StatusNotReady = "notready";
+    public const string StatusReady = "ready";
+    public const string StatusPlaying = "playing";
+    public const string StatusSpectating = "spectating";
+
+    public const string LevelMissing = "missing";
+    public const string LevelDownloading = "downloading";
+    public const string LevelReady = "ready";
+    public const string LevelFailed = "failed";
+
+    /// <summary>Side 0 = player / Boyfriend chart (chart 0); side 1 = enemy chart (chart 1).</summary>
+    public const int SidePlayer = 0;
+    public const int SideEnemy = 1;
 
     public const string TokenHeader = "X-Transfer-Token";
+
+    public const int MinPlayers = 2;
+    public const int MaxPlayers = 8;
+    public const int MaxRoomNameLength = 32;
+    public const int MaxChatLength = 200;
 }
+
+// ══════════════════════════════════════════════════════════════════════════
+// Session
+// ══════════════════════════════════════════════════════════════════════════
+
+public sealed class HelloRequest
+{
+    public string PlayerId { get; set; } = "";
+    public string Username { get; set; } = "";
+    /// <summary>Leaderboard color hue (0-360).</summary>
+    public int ColorHue { get; set; } = 180;
+    public string ClientVersion { get; set; } = "";
+    public int ProtocolVersion { get; set; }
+}
+
+public sealed class HelloResult
+{
+    public bool Ok { get; set; }
+    public string Error { get; set; } = "";
+    public int ProtocolVersion { get; set; } = Protocol.Version;
+    public string ServerVersion { get; set; } = "";
+    public long MaxUploadBytes { get; set; }
+}
+
+public sealed class OpResult
+{
+    public bool Ok { get; set; }
+    public string Error { get; set; } = "";
+    public string RoomId { get; set; } = "";
+
+    public static OpResult Success(string roomId = "") => new() { Ok = true, RoomId = roomId };
+    public static OpResult Fail(string error) => new() { Ok = false, Error = error };
+}
+
+public sealed class PingRequest
+{
+    public long ClientTimestamp { get; set; }
+}
+
+public sealed class PongPacket
+{
+    public long ClientTimestamp { get; set; }
+    public long ServerTimestamp { get; set; }
+    public int Ping { get; set; }
+}
+
+// ══════════════════════════════════════════════════════════════════════════
+// Rooms
+// ══════════════════════════════════════════════════════════════════════════
 
 /// <summary>One level a player has in their local levels folder.</summary>
 public sealed class LevelEntry
@@ -36,123 +121,299 @@ public sealed class LevelEntry
     /// <summary>File name with extension (.fnmm / .zip / .rar).</summary>
     public string FileName { get; set; } = "";
     public long Size { get; set; }
+    /// <summary>Star rating computed by the game (0 = unknown).</summary>
+    public float Stars { get; set; }
+}
+
+public sealed class RoomSettings
+{
+    public string Mode { get; set; } = Protocol.ModeVersus;
+    public string SongSelection { get; set; } = Protocol.SelectTurns;
+    /// <summary>Empty = open room.</summary>
+    public string Password { get; set; } = "";
+    public int MaxPlayers { get; set; } = 2;
+    /// <summary>Guests may pick levels they (or other guests) have locally, not only official / host levels.</summary>
+    public bool AllowGuestLocalLevels { get; set; } = true;
+}
+
+public sealed class CreateRoomRequest
+{
+    public string Name { get; set; } = "";
+    public RoomSettings Settings { get; set; } = new();
+    public List<LevelEntry> Levels { get; set; } = new();
 }
 
 public sealed class JoinRoomRequest
 {
-    public string RoomCode { get; set; } = "";
-    public string PlayerId { get; set; } = "";
-    public string Username { get; set; } = "";
-    /// <summary>Leaderboard color hue (0-360), shown as the player's square next to levels.</summary>
-    public int ColorHue { get; set; } = 180;
-    public string ClientVersion { get; set; } = "";
-    public int ProtocolVersion { get; set; }
+    public string RoomId { get; set; } = "";
+    public string Password { get; set; } = "";
     public List<LevelEntry> Levels { get; set; } = new();
 }
 
-public sealed class JoinRoomResult
+public sealed class RoomPlayerSummary
 {
-    public bool Ok { get; set; }
-    public string Error { get; set; } = "";
-    public int ProtocolVersion { get; set; } = Protocol.Version;
-    public long MaxUploadBytes { get; set; }
+    public string Id { get; set; } = "";
+    public string Username { get; set; } = "";
+    public int ColorHue { get; set; } = 180;
 }
 
-public sealed class QueueResult
+/// <summary>A row of the room browser.</summary>
+public sealed class RoomSummary
 {
-    public bool Ok { get; set; }
-    public string Error { get; set; } = "";
+    public string Id { get; set; } = "";
+    public string Name { get; set; } = "";
+    public bool HasPassword { get; set; }
+    public string Mode { get; set; } = "";
+    public string Phase { get; set; } = "";
+    /// <summary>Song being played right now (empty unless loading / playing).</summary>
+    public string SongName { get; set; } = "";
+    public float SongStars { get; set; }
+    public string HostName { get; set; } = "";
+    public List<RoomPlayerSummary> Players { get; set; } = new();
+    public int PlayerCount { get; set; }
+    public int MaxPlayers { get; set; }
 }
 
-/// <summary>A level as one specific player sees the room (sent per player).</summary>
+public sealed class SongInfo
+{
+    public string Source { get; set; } = Protocol.SourceOfficial;
+    public string Hash { get; set; } = "";
+    public string Name { get; set; } = "";
+    public string FileName { get; set; } = "";
+    public long Size { get; set; }
+    /// <summary>Official level id (download via /api/verified_levels/{id}/download).</summary>
+    public string OfficialId { get; set; } = "";
+    public float Stars { get; set; }
+    /// <summary>Player who picked it.</summary>
+    public string PickedBy { get; set; } = "";
+}
+
+public sealed class RoomMember
+{
+    public string Id { get; set; } = "";
+    public string Username { get; set; } = "";
+    public int ColorHue { get; set; } = 180;
+    public bool IsHost { get; set; }
+    /// <summary>notready / ready / playing / spectating.</summary>
+    public string Status { get; set; } = Protocol.StatusNotReady;
+    /// <summary>Wants to spectate the next round(s) instead of playing.</summary>
+    public bool Spectate { get; set; }
+    /// <summary>Level status for the current song: missing / downloading / ready / failed.</summary>
+    public string LevelStatus { get; set; } = Protocol.LevelMissing;
+    /// <summary>0-1 download progress when downloading.</summary>
+    public float LevelProgress { get; set; }
+    /// <summary>Mirror vote for the current song: -1 none, 0 player, 1 enemy.</summary>
+    public int Vote { get; set; } = -1;
+}
+
+/// <summary>A local level somebody in the room has.</summary>
 public sealed class RoomLevel
 {
     public string Hash { get; set; } = "";
     public string Name { get; set; } = "";
     public string FileName { get; set; } = "";
     public long Size { get; set; }
-    /// <summary>The receiving player has this exact file.</summary>
+    public float Stars { get; set; }
     public bool YouHave { get; set; }
-    /// <summary>How many other players in the room have this exact file.</summary>
-    public int OthersHave { get; set; }
-    /// <summary>How many players (including you) are queued for this level.</summary>
-    public int Waiting { get; set; }
-    /// <summary>Ids (<see cref="RoomPlayer.Id"/>) of the other players who have this exact file.</summary>
+    /// <summary>Ids of the other players who have this exact file.</summary>
     public List<string> Holders { get; set; } = new();
+    /// <summary>You may pick it on your turn (host's level, or guest levels allowed).</summary>
+    public bool Pickable { get; set; }
 }
 
-/// <summary>Another player in the room.</summary>
-public sealed class RoomPlayer
+public sealed class MatchAssignment
 {
-    /// <summary>Stable id within the room (the player's PlayerId).</summary>
-    public string Id { get; set; } = "";
+    public string PlayerId { get; set; } = "";
+    /// <summary>0 = player side (chart 0), 1 = enemy side (chart 1).</summary>
+    public int Side { get; set; }
+    /// <summary>Teams mode: 0 / 1 (same as the side). -1 in other modes.</summary>
+    public int Team { get; set; } = -1;
+}
+
+public sealed class MatchInfo
+{
+    public string MatchId { get; set; } = "";
+    public string Mode { get; set; } = "";
+    public SongInfo Song { get; set; } = new();
+    public List<MatchAssignment> Players { get; set; } = new();
+    /// <summary>Synced server time (ms) the song starts at; 0 while loading.</summary>
+    public long StartTimestamp { get; set; }
+    /// <summary>Mirror: the side everybody plays.</summary>
+    public int MirrorSide { get; set; } = -1;
+}
+
+public sealed class MatchStartPacket
+{
+    public string MatchId { get; set; } = "";
+    public long StartTimestamp { get; set; }
+}
+
+public sealed class PlayerResult
+{
+    public string PlayerId { get; set; } = "";
     public string Username { get; set; } = "";
     public int ColorHue { get; set; } = 180;
+    public int Side { get; set; }
+    public int Team { get; set; } = -1;
+    public long Score { get; set; }
+    public float Accuracy { get; set; }
+    public int Misses { get; set; }
+    public int Sicks { get; set; }
+    public int Goods { get; set; }
+    public int Bads { get; set; }
+    public int Shits { get; set; }
+    public int MaxCombo { get; set; }
+    /// <summary>1-based place (players sharing a score share a place). Teams: individual rank.</summary>
+    public int Place { get; set; }
+    public bool Disconnected { get; set; }
 }
 
+public sealed class RoundResult
+{
+    public string MatchId { get; set; } = "";
+    public string Mode { get; set; } = "";
+    public SongInfo Song { get; set; } = new();
+    public List<PlayerResult> Players { get; set; } = new();
+    /// <summary>Teams mode: average score of team 0 / team 1.</summary>
+    public List<double> TeamScores { get; set; } = new();
+    /// <summary>Teams: 0 / 1, or -1 for a draw / other modes.</summary>
+    public int WinningTeam { get; set; } = -1;
+    public long FinishedAt { get; set; }
+}
+
+public sealed class ChatMessage
+{
+    /// <summary>Empty for system messages.</summary>
+    public string PlayerId { get; set; } = "";
+    public string Username { get; set; } = "";
+    public int ColorHue { get; set; } = 180;
+    public string Text { get; set; } = "";
+    public bool System { get; set; }
+    public long Timestamp { get; set; }
+}
+
+/// <summary>Full view of the room, personalised for the receiving player (sent on every change).</summary>
 public sealed class RoomStatePacket
 {
-    public string RoomCode { get; set; } = "";
-    public int Members { get; set; }
-    public List<RoomLevel> Levels { get; set; } = new();
-    /// <summary>The other players in the room (not you), in join order.</summary>
-    public List<RoomPlayer> Players { get; set; } = new();
+    public string RoomId { get; set; } = "";
+    public string Name { get; set; } = "";
+    /// <summary>Settings; Password is only filled in for the host.</summary>
+    public RoomSettings Settings { get; set; } = new();
+    public bool HasPassword { get; set; }
+    public string Phase { get; set; } = Protocol.PhaseLobby;
+    /// <summary>In join order (= turn order). The host is always first.</summary>
+    public List<RoomMember> Members { get; set; } = new();
+    public string HostId { get; set; } = "";
+    public string YouId { get; set; } = "";
+    /// <summary>Player whose turn it is to pick a song (empty when nobody can pick).</summary>
+    public string TurnPlayerId { get; set; } = "";
+    public SongInfo? Song { get; set; }
+    /// <summary>Current / last match while loading or playing.</summary>
+    public MatchInfo? Match { get; set; }
+    /// <summary>Why the round can't start yet (shown under the song), empty when it can.</summary>
+    public string StartBlocker { get; set; } = "";
+    /// <summary>Every local level in the room. Null = unchanged since the last RoomState you got.</summary>
+    public List<RoomLevel>? Levels { get; set; }
+    /// <summary>Rounds played in this room, oldest first. Null = unchanged since the last RoomState you got.</summary>
+    public List<RoundResult>? History { get; set; }
 }
 
-public sealed class QueueStatePacket
+// ══════════════════════════════════════════════════════════════════════════
+// Round flow
+// ══════════════════════════════════════════════════════════════════════════
+
+public sealed class SongSelection
 {
-    /// <summary>Hash the player is queued for, or empty when not queued.</summary>
+    public string Source { get; set; } = Protocol.SourceOfficial;
     public string Hash { get; set; } = "";
-    public bool YouHave { get; set; }
-    /// <summary>Players queued for this level, including you.</summary>
-    public int Waiting { get; set; }
-    /// <summary>Players in the room (queued or not) that have the file.</summary>
-    public int HoldersInRoom { get; set; }
+    public string Name { get; set; } = "";
+    public string OfficialId { get; set; } = "";
+    public float Stars { get; set; }
 }
 
-public sealed class TransferStartedPacket
+public sealed class LevelStatusUpdate
+{
+    public string Hash { get; set; } = "";
+    public string State { get; set; } = Protocol.LevelMissing;
+    public float Progress { get; set; }
+}
+
+public sealed class TransferUploadPacket
 {
     public string TransferId { get; set; } = "";
+    public string Token { get; set; } = "";
+    public string Hash { get; set; } = "";
+    public string FileName { get; set; } = "";
+    public long Size { get; set; }
+}
+
+public sealed class TransferDownloadPacket
+{
+    public string TransferId { get; set; } = "";
+    public string Token { get; set; } = "";
     public string Hash { get; set; } = "";
     public string Name { get; set; } = "";
     public string FileName { get; set; } = "";
     public long Size { get; set; }
-    /// <summary>"upload" (you have the level) or "download".</summary>
-    public string Role { get; set; } = "";
-    /// <summary>Starting phase: "upload", or "download" when the server already has the file.</summary>
-    public string Phase { get; set; } = "";
-    /// <summary>Secret for the HTTP endpoint matching your role.</summary>
-    public string Token { get; set; } = "";
-    public string OpponentName { get; set; } = "";
 }
 
-public sealed class TransferProgressPacket
-{
-    public string TransferId { get; set; } = "";
-    public string Phase { get; set; } = "";
-    public long Bytes { get; set; }
-    public long Total { get; set; }
-}
-
-public sealed class ReadyToDownloadPacket
-{
-    public string TransferId { get; set; } = "";
-}
-
-public sealed class TransferCancelledPacket
-{
-    public string TransferId { get; set; } = "";
-    public string Reason { get; set; } = "";
-    /// <summary>True when you were put back in the queue for the same level.</summary>
-    public bool Requeued { get; set; }
-}
-
-public sealed class MatchReadyPacket
+public sealed class TransferFailedPacket
 {
     public string Hash { get; set; } = "";
-    public string Name { get; set; } = "";
-    public string FileName { get; set; } = "";
-    /// <summary>Private room code to send to the game server's FindMatch (unique to this pair).</summary>
-    public string MatchCode { get; set; } = "";
-    public string OpponentName { get; set; } = "";
+    public string Reason { get; set; } = "";
+}
+
+public sealed class KickedPacket
+{
+    public string Reason { get; set; } = "";
+}
+
+// ══════════════════════════════════════════════════════════════════════════
+// In-match relay
+// ══════════════════════════════════════════════════════════════════════════
+
+public sealed class PlayerStatePacket
+{
+    public string PlayerId { get; set; } = "";
+    public long Score { get; set; }
+    public int Combo { get; set; }
+    public int MaxCombo { get; set; }
+    public float Accuracy { get; set; }
+    public int Sicks { get; set; }
+    public int Goods { get; set; }
+    public int Bads { get; set; }
+    public int Shits { get; set; }
+    public int Misses { get; set; }
+    /// <summary>Song time (s) of the sender.</summary>
+    public float SongTime { get; set; }
+}
+
+public sealed class PlayerHitPacket
+{
+    public string PlayerId { get; set; } = "";
+    public int Lane { get; set; }
+    public string Rating { get; set; } = "";
+    /// <summary>Hold end in song seconds, or -1.</summary>
+    public float HoldEnd { get; set; } = -1f;
+    public float SongTime { get; set; }
+}
+
+public sealed class PlayerKeyPressPacket
+{
+    public string PlayerId { get; set; } = "";
+    public int Lane { get; set; }
+    public float SongTime { get; set; }
+}
+
+public sealed class FinishMatchRequest
+{
+    public string MatchId { get; set; } = "";
+    public long Score { get; set; }
+    public float Accuracy { get; set; }
+    public int Misses { get; set; }
+    public int Sicks { get; set; }
+    public int Goods { get; set; }
+    public int Bads { get; set; }
+    public int Shits { get; set; }
+    public int MaxCombo { get; set; }
 }
