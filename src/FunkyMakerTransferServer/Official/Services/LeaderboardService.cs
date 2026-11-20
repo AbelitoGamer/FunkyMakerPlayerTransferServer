@@ -74,22 +74,46 @@ public class LeaderboardService : IHostedService
         }
     }
 
+    /// <summary>
+    /// FUNKYMAKER_DATA_DIR, else leaderboard_data next to the binary. If that folder can't be
+    /// created / written (e.g. the Docker image runs as a non-root user and /app is read-only),
+    /// falls back to a folder in the system temp directory instead of crashing at startup.
+    /// </summary>
     private static string ResolveDataFolder()
     {
         string? envDir = Environment.GetEnvironmentVariable("FUNKYMAKER_DATA_DIR");
-        return !string.IsNullOrWhiteSpace(envDir)
+        string preferred = !string.IsNullOrWhiteSpace(envDir)
             ? envDir.Trim()
             : Path.Combine(AppContext.BaseDirectory, "leaderboard_data");
+        if (IsWritable(preferred)) return preferred;
+
+        string fallback = Path.Combine(Path.GetTempPath(), "funkymaker_leaderboard_data");
+        Console.WriteLine($"[Leaderboard] Can't write to {preferred}; using {fallback} instead");
+        Directory.CreateDirectory(fallback);
+        return fallback;
+    }
+
+    private static bool IsWritable(string dir)
+    {
+        try
+        {
+            Directory.CreateDirectory(dir);
+            string probe = Path.Combine(dir, $".write-test-{Guid.NewGuid():N}");
+            File.WriteAllText(probe, "");
+            File.Delete(probe);
+            return true;
+        }
+        catch
+        {
+            return false;
+        }
     }
 
     public LeaderboardService()
     {
         // Ensure data folder exists for local JSON fallback/backup
-        if (!Directory.Exists(DataFolder))
-        {
-            Directory.CreateDirectory(DataFolder);
-            Console.WriteLine($"[Leaderboard] Created data folder: {DataFolder}");
-        }
+        Directory.CreateDirectory(DataFolder);
+        Console.WriteLine($"[Leaderboard] Data folder: {DataFolder}");
 
         ConfigureMongoDb();
         LoadData();
