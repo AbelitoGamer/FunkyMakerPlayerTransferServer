@@ -12,5 +12,5 @@ public sealed class TestingOptions
     public bool Open { get; set; } = true;
 
     /// <summary>Text shown to players when testing is closed; empty = the client's default text.</summary>
-    public string Message { get; set; } = "";
+    public string Message { get; set; } = "Testing's currently closed. Come back later!";
 }
