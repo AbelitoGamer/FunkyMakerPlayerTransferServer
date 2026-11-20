@@ -9,7 +9,7 @@ namespace FunkyMakerTransferServer;
 public sealed class TestingOptions
 {
     /// <summary>false = test builds refuse to start and show <see cref="Message"/>.</summary>
-    public bool Open { get; set; } = true;
+    public bool Open { get; set; } = false;
 
     /// <summary>Text shown to players when testing is closed; empty = the client's default text.</summary>
     public string Message { get; set; } = "Testing's currently closed. Come back later!";
