@@ -192,6 +192,58 @@ public sealed class RoomFlowTests : IDisposable
     }
 
     [Fact]
+    public async Task Host_forcestart_starts_without_the_others_pressing_ready()
+    {
+        var lvl = TestLevel.Create("Forced");
+        await using var a = await TestPlayer.ConnectAsync(_factory, "A", lvl);
+        await using var b = await TestPlayer.ConnectAsync(_factory, "B", lvl);
+        string id = await a.CreateAsync();
+        await b.JoinAsync(id);
+        Assert.True((await a.PickLocalAsync(lvl)).Ok);
+        await a.WaitState(x => x.Members.All(m => m.LevelStatus == Protocol.LevelReady));
+
+        await a.Hub.InvokeAsync("SendChat", "/forcestart");
+
+        var info = await b.WaitFor<MatchInfo>(Protocol.MatchLoading);
+        Assert.Equal(2, info.Players.Count);
+        await b.WaitChat("force-started");
+        Assert.DoesNotContain(b.All<ChatMessage>(Protocol.Chat), c => c.Text == "/forcestart");
+    }
+
+    [Fact]
+    public async Task Forcestart_is_host_only()
+    {
+        var lvl = TestLevel.Create("NotHost");
+        await using var a = await TestPlayer.ConnectAsync(_factory, "A", lvl);
+        await using var b = await TestPlayer.ConnectAsync(_factory, "B", lvl);
+        string id = await a.CreateAsync();
+        await b.JoinAsync(id);
+        Assert.True((await a.PickLocalAsync(lvl)).Ok);
+        await a.WaitState(x => x.Members.All(m => m.LevelStatus == Protocol.LevelReady));
+
+        await b.Hub.InvokeAsync("SendChat", "/forcestart");
+
+        await b.WaitChat("Only the host");
+        Assert.Empty(a.All<MatchInfo>(Protocol.MatchLoading));
+    }
+
+    [Fact]
+    public async Task Forcestart_still_needs_everybody_to_have_the_level()
+    {
+        var lvl = TestLevel.Create("Missing");
+        await using var a = await TestPlayer.ConnectAsync(_factory, "A", lvl);
+        await using var b = await TestPlayer.ConnectAsync(_factory, "B");
+        string id = await a.CreateAsync();
+        await b.JoinAsync(id);
+        Assert.True((await a.PickLocalAsync(lvl)).Ok);
+
+        await a.Hub.InvokeAsync("SendChat", "/forcestart");
+
+        await a.WaitChat("can't start yet");
+        Assert.Empty(a.All<MatchInfo>(Protocol.MatchLoading));
+    }
+
+    [Fact]
     public async Task Official_level_needs_the_client_to_report_it_ready()
     {
         var off = _factory.Official.Add("Spirit Dance");

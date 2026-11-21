@@ -360,6 +360,11 @@ public sealed partial class RoomRegistry
             var now = Now;
             if (now - m.LastChat < ChatInterval) return;
             m.LastChat = now;
+            if (clean.Equals("/forcestart", StringComparison.OrdinalIgnoreCase))
+            {
+                ForceStartLocked(m, fx);
+                return;
+            }
             AddChatLocked(m.Room, new ChatMessage
             {
                 PlayerId = m.Session.PlayerId,
@@ -369,6 +374,41 @@ public sealed partial class RoomRegistry
                 Timestamp = NowMs,
             }, fx);
         }
+    }
+
+    /// <summary>
+    /// Host chat command "/forcestart": marks every playing member who has the level as ready,
+    /// then starts the round if nothing else blocks it (workaround for clients whose Ready
+    /// button doesn't work). Players still need the level; the reason is posted if it can't start.
+    /// </summary>
+    private void ForceStartLocked(Member m, Effects fx)
+    {
+        var room = m.Room;
+        if (room.Host != m)
+        {
+            AddSystemChatLocked(room, "Only the host can use /forcestart.", fx);
+            return;
+        }
+        if (room.Phase != Protocol.PhaseSongSelected || room.Song == null)
+        {
+            AddSystemChatLocked(room, "/forcestart: no song is waiting to start.", fx);
+            return;
+        }
+
+        foreach (var p in ActivePlayers(room))
+            if (p.LevelState == Protocol.LevelReady) p.Ready = true;
+
+        string? blocker = StartBlockerLocked(room);
+        if (blocker != null)
+        {
+            AddSystemChatLocked(room, $"/forcestart: can't start yet. {blocker}.", fx);
+            BroadcastRoomLocked(room, fx);
+            return;
+        }
+
+        AddSystemChatLocked(room, $"{m.Session.Username} force-started the round.", fx);
+        TryAdvanceRoundLocked(room, fx);
+        BroadcastRoomLocked(room, fx);
     }
 
     public void SetSpectate(string connectionId, bool spectate, Effects fx)
