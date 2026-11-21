@@ -76,6 +76,9 @@ public sealed partial class RoomRegistry
 
     public long MaxUploadBytes => _options.MaxUploadBytes;
 
+    /// <summary>Highest player limit a room may have (Transfer:MaxRoomMembers, clamped).</summary>
+    public int MaxRoomPlayers => Math.Clamp(_options.MaxRoomMembers, Protocol.MinPlayers, Protocol.HardMaxPlayers);
+
     /// <summary>Picks random values (team split, sides, ties). Tests replace it for determinism.</summary>
     internal Func<int, int> RandomInt { get; set; } = max => RandomNumberGenerator.GetInt32(max);
 
@@ -113,7 +116,7 @@ public sealed partial class RoomRegistry
             // Profile changes show up in the room right away.
             if (s.Member != null) BroadcastRoomLocked(s.Member.Room, fx);
         }
-        return new HelloResult { Ok = true, MaxUploadBytes = _options.MaxUploadBytes };
+        return new HelloResult { Ok = true, MaxUploadBytes = _options.MaxUploadBytes, MaxRoomPlayers = MaxRoomPlayers };
     }
 
     /// <summary>Updates the connection's average ping (used for the start buffer) and returns the reply.</summary>
@@ -585,8 +588,10 @@ public sealed partial class RoomRegistry
             var match = room.Match;
             if (match == null || match.Info.MatchId != matchId || room.Phase != Protocol.PhaseLoading) return;
             if (!match.Participants.ContainsKey(m.Session.PlayerId)) return;
-            match.Loaded.Add(m.Session.PlayerId);
+            if (match.Loaded.Add(m.Session.PlayerId))
+                match.Info.Loaded = match.Loaded.ToList();
             TryStartMatchLocked(room, fx);
+            BroadcastRoomLocked(room, fx); // loading screens show who has loaded
         }
     }
 
@@ -639,6 +644,8 @@ public sealed partial class RoomRegistry
             }
             if (match.Participants.Values.All(x => x.Final != null || x.Gone))
                 FinishRoundLocked(room, fx);
+            else
+                BroadcastRoomLocked(room, fx); // statuses: FINISHED / LEFT MATCH (they stayed PLAYING)
         }
     }
 
@@ -1501,7 +1508,11 @@ public sealed partial class RoomRegistry
         {
             string id = m.Session.PlayerId;
             string status = inMatch
-                ? (room.Match!.Participants.ContainsKey(id) ? Protocol.StatusPlaying : Protocol.StatusSpectating)
+                ? (room.Match!.Participants.TryGetValue(id, out var part)
+                    ? (part.Gone || part.Final?.Quit == true ? Protocol.StatusLeftMatch
+                       : part.Final != null ? Protocol.StatusFinished
+                       : Protocol.StatusPlaying)
+                    : Protocol.StatusSpectating)
                 : m.Spectate ? Protocol.StatusSpectating
                 : m.Ready ? Protocol.StatusReady : Protocol.StatusNotReady;
             bool uploading = m.UploadProgress >= 0f;
@@ -1580,7 +1591,7 @@ public sealed partial class RoomRegistry
     // Internals: validation
     // ══════════════════════════════════════════════════════════════════════
 
-    private static RoomSettings? SanitizeSettings(RoomSettings? s, int minPlayers, out string? error)
+    private RoomSettings? SanitizeSettings(RoomSettings? s, int minPlayers, out string? error)
     {
         error = null;
         s ??= new RoomSettings();
@@ -1588,8 +1599,8 @@ public sealed partial class RoomRegistry
         if (mode.Length == 0) { error = "Unknown game mode."; return null; }
         string sel = s.SongSelection is Protocol.SelectTurns or Protocol.SelectHost ? s.SongSelection : "";
         if (sel.Length == 0) { error = "Unknown song selection mode."; return null; }
-        if (s.MaxPlayers < Protocol.MinPlayers || s.MaxPlayers > Protocol.MaxPlayers)
-        { error = $"The player limit must be between {Protocol.MinPlayers} and {Protocol.MaxPlayers}."; return null; }
+        if (s.MaxPlayers < Protocol.MinPlayers || s.MaxPlayers > MaxRoomPlayers)
+        { error = $"The player limit must be between {Protocol.MinPlayers} and {MaxRoomPlayers}."; return null; }
         if (s.MaxPlayers < minPlayers)
         { error = $"There are already {minPlayers} players in the room."; return null; }
         string password = (s.Password ?? "").Trim();

@@ -44,6 +44,10 @@ public static class Protocol
     public const string StatusReady = "ready";
     public const string StatusPlaying = "playing";
     public const string StatusSpectating = "spectating";
+    /// <summary>Match participant whose song ended (waiting for the others).</summary>
+    public const string StatusFinished = "finished";
+    /// <summary>Match participant who left the match (Exit Match) and is back in the room.</summary>
+    public const string StatusLeftMatch = "leftmatch";
 
     public const string LevelMissing = "missing";
     public const string LevelDownloading = "downloading";
@@ -57,7 +61,10 @@ public static class Protocol
     public const string TokenHeader = "X-Transfer-Token";
 
     public const int MinPlayers = 2;
+    /// <summary>Default player limit cap (the real cap is Transfer:MaxRoomMembers, see RoomRegistry.MaxRoomPlayers).</summary>
     public const int MaxPlayers = 8;
+    /// <summary>Hard ceiling for Transfer:MaxRoomMembers.</summary>
+    public const int HardMaxPlayers = 32;
     public const int MaxRoomNameLength = 32;
     public const int MaxChatLength = 200;
 }
@@ -83,6 +90,8 @@ public sealed class HelloResult
     public int ProtocolVersion { get; set; } = Protocol.Version;
     public string ServerVersion { get; set; } = "";
     public long MaxUploadBytes { get; set; }
+    /// <summary>Highest player limit a host may give a room (Transfer:MaxRoomMembers).</summary>
+    public int MaxRoomPlayers { get; set; } = Protocol.MaxPlayers;
 }
 
 public sealed class OpResult
@@ -240,6 +249,8 @@ public sealed class MatchInfo
     public long StartTimestamp { get; set; }
     /// <summary>Mirror: the side everybody plays.</summary>
     public int MirrorSide { get; set; } = -1;
+    /// <summary>Participants whose level finished loading (the loading screen shows who is ready).</summary>
+    public List<string> Loaded { get; set; } = new();
 }
 
 public sealed class MatchStartPacket

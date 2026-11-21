@@ -112,6 +112,9 @@ public sealed class RoomFlowTests : IDisposable
         Assert.Equal(new[] { 0, 1 }, info.Players.Select(p => p.Side).OrderBy(x => x));
 
         await a.Hub.InvokeAsync("MatchLoaded", info.MatchId);
+        // The others' loading screens learn who has loaded.
+        var loadedState = await b.WaitState(x => x.Match != null && x.Match.Loaded.Contains(a.PlayerId));
+        Assert.DoesNotContain(b.PlayerId, loadedState.Match!.Loaded);
         await b.Hub.InvokeAsync("MatchLoaded", info.MatchId);
         var start = await b.WaitFor<MatchStartPacket>(Protocol.MatchStart);
         Assert.True(start.StartTimestamp > DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() + 2000);
@@ -176,6 +179,32 @@ public sealed class RoomFlowTests : IDisposable
         Assert.Equal(3, info.Players.Count);
         Assert.Contains(info.Players, p => p.Team == 0);
         Assert.Contains(info.Players, p => p.Team == 1);
+    }
+
+    [Fact]
+    public async Task Player_limit_follows_MaxRoomMembers()
+    {
+        using var factory = new ServerFactory();
+        factory.Settings["Transfer:MaxRoomMembers"] = "12";
+        await using var a = await TestPlayer.ConnectAsync(factory, "A");
+        var hello = await a.Hub.InvokeAsync<HelloResult>("Hello", new HelloRequest
+        {
+            PlayerId = a.PlayerId, Username = "A", ColorHue = 120, ProtocolVersion = Protocol.Version,
+        });
+        Assert.Equal(12, hello.MaxRoomPlayers);
+
+        var tooMany = await a.Hub.InvokeAsync<OpResult>("CreateRoom", new CreateRoomRequest { Name = "Big", Settings = new RoomSettings { MaxPlayers = 13 } });
+        Assert.False(tooMany.Ok);
+        string id = await a.CreateAsync(new RoomSettings { MaxPlayers = 12 });
+        Assert.Equal(12, (await a.WaitState(s => s.RoomId == id)).Settings.MaxPlayers);
+    }
+
+    [Fact]
+    public async Task Player_limit_defaults_to_8()
+    {
+        await using var a = await TestPlayer.ConnectAsync(_factory, "A");
+        var r = await a.Hub.InvokeAsync<OpResult>("CreateRoom", new CreateRoomRequest { Name = "Big", Settings = new RoomSettings { MaxPlayers = 9 } });
+        Assert.False(r.Ok);
     }
 
     [Fact]
@@ -468,7 +497,11 @@ public sealed class RoomFlowTests : IDisposable
         await b.Hub.InvokeAsync("FinishMatch", new FinishMatchRequest { MatchId = info.MatchId, Score = 99999, Quit = true });
         await a.WaitChat("B left the match");
         Assert.Empty(a.All<RoundResult>(Protocol.MatchResults)); // the others are still playing
+        // Statuses follow: B is back in the room (LEFT MATCH), not PLAYING until the round ends.
+        await c.WaitState(x => x.Members.Single(m => m.Id == b.PlayerId).Status == Protocol.StatusLeftMatch);
         await a.Hub.InvokeAsync("FinishMatch", new FinishMatchRequest { MatchId = info.MatchId, Score = 500 });
+        var finished = await c.WaitState(x => x.Members.Single(m => m.Id == a.PlayerId).Status == Protocol.StatusFinished);
+        Assert.Equal(Protocol.StatusPlaying, finished.Members.Single(m => m.Id == c.PlayerId).Status);
         await c.Hub.InvokeAsync("FinishMatch", new FinishMatchRequest { MatchId = info.MatchId, Score = 400 });
         var result = await a.WaitFor<RoundResult>(Protocol.MatchResults);
         var bRes = result.Players.Single(p => p.Username == "B");

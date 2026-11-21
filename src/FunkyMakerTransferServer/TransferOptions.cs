@@ -7,7 +7,11 @@ namespace FunkyMakerTransferServer;
 public sealed class TransferOptions
 {
     public int MaxUploadMegabytes { get; set; } = 100;
-    public int MaxRoomMembers { get; set; } = 16;
+    /// <summary>
+    /// Highest player limit hosts can give their rooms (env <c>Transfer__MaxRoomMembers</c>), clamped
+    /// to 2..<see cref="Protocol.HardMaxPlayers"/>. It used to be unused (always 8).
+    /// </summary>
+    public int MaxRoomMembers { get; set; } = Protocol.MaxPlayers;
     public int MaxLevelsPerMember { get; set; } = 2000;
     /// <summary>A transfer with no progress for this long is cancelled.</summary>
     public int StallTimeoutSeconds { get; set; } = 60;

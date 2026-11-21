@@ -42,9 +42,12 @@ public sealed class ServerFactory : WebApplicationFactory<Program>
 {
     public string StorageDir { get; } = Path.Combine(Path.GetTempPath(), "fmtransfer-tests-" + Guid.NewGuid().ToString("N"));
     public FakeOfficialLevels Official { get; } = new();
+    /// <summary>Extra configuration (e.g. "Transfer:MaxRoomMembers"), applied before the server starts.</summary>
+    public Dictionary<string, string> Settings { get; } = new();
 
     protected override void ConfigureWebHost(IWebHostBuilder builder)
     {
+        foreach (var (k, v) in Settings) builder.UseSetting(k, v);
         builder.UseSetting("Transfer:StorageDirectory", StorageDir);
         builder.UseSetting("Transfer:ProgressIntervalMs", "0");
         builder.UseSetting("Transfer:HttpRequestsPerMinute", "1000");
