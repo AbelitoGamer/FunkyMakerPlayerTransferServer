@@ -31,9 +31,10 @@ public static class TransferEndpoints
             sizeFeature.MaxRequestBodySize = ticket.Size;
 
         string path = store.NewUploadPath(id);
-        if (ctx.Request.ContentLength is long announced && announced != ticket.Size)
+        // FNF level files have an exact size; packed osu! sets may be anything up to the limit.
+        if (ctx.Request.ContentLength is long announced && (ticket.ExactSize ? announced != ticket.Size : announced > ticket.Size))
         {
-            await Fail("The upload size does not match the level.");
+            await Fail(ticket.ExactSize ? "The upload size does not match the level." : "The packed set is larger than this server allows.");
             return Results.Problem("Content-Length does not match the level size.", statusCode: 400);
         }
 
@@ -56,7 +57,7 @@ public static class TransferEndpoints
                         Array.Copy(buffer, 0, header, headerLen, take);
                         headerLen += take;
                         if (headerLen == header.Length && !LevelFile.HasKnownSignature(header))
-                            throw new InvalidDataException("The file is not a level archive (.fnmm/.zip/.rar).");
+                            throw new InvalidDataException("The file is not a level archive (.fnmm/.zip/.rar/.osz).");
                     }
 
                     total += n;

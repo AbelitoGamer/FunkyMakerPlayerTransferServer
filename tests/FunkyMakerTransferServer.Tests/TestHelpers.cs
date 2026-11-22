@@ -70,13 +70,40 @@ public sealed class ServerFactory : WebApplicationFactory<Program>
 public sealed record TestLevel(string Name, byte[] Bytes)
 {
     public string Hash => Convert.ToHexStringLower(SHA256.HashData(Bytes));
-    public LevelEntry Entry => new() { Hash = Hash, Name = Name, FileName = Name + ".fnmm", Size = Bytes.Length, Stars = 3.5f };
+
+    /// <summary>osu!: the difficulty's set (null = an FNF level file).</summary>
+    public string? SetId { get; init; }
+    public long SetSize { get; init; }
+    public long SetSizeNoVideo { get; init; }
+
+    public LevelEntry Entry => SetId == null
+        ? new() { Hash = Hash, Name = Name, FileName = Name + ".fnmm", Size = Bytes.Length, Stars = 3.5f }
+        : new()
+        {
+            Hash = Hash, Name = Name + " [Hard]", FileName = Name + ".osz", Size = SetSize, Stars = 3.5f,
+            Kind = Protocol.KindOsu, SetId = SetId, SetName = Name, Difficulty = "Hard", SizeNoVideo = SetSizeNoVideo,
+        };
 
     public static TestLevel Create(string name, int size = 300_000)
     {
         var bytes = RandomNumberGenerator.GetBytes(size);
         bytes[0] = (byte)'P'; bytes[1] = (byte)'K'; bytes[2] = 3; bytes[3] = 4;
         return new TestLevel(name, bytes);
+    }
+
+    /// <summary>An osu!mania difficulty (Bytes = its .osu file) of a set of about <paramref name="setSize"/> bytes.</summary>
+    public static TestLevel Osu(string name, long setSize = 2_000_000, long sizeNoVideo = 0) =>
+        new(name, RandomNumberGenerator.GetBytes(4_000))
+        {
+            SetId = "set-" + name.ToLowerInvariant(), SetSize = setSize, SetSizeNoVideo = sizeNoVideo,
+        };
+
+    /// <summary>A packed set as the uploader would send it (a zip-signed blob).</summary>
+    public static byte[] Package(int size)
+    {
+        var bytes = RandomNumberGenerator.GetBytes(size);
+        bytes[0] = (byte)'P'; bytes[1] = (byte)'K'; bytes[2] = 3; bytes[3] = 4;
+        return bytes;
     }
 }
 
@@ -120,7 +147,10 @@ public sealed class TestPlayer : IAsyncDisposable
     private void Record<T>(string method) where T : class =>
         Hub.On<T>(method, p => { lock (_messages) _messages.Add((method, p)); });
 
-    public static async Task<TestPlayer> ConnectAsync(ServerFactory factory, string name, params TestLevel[] levels)
+    public static Task<TestPlayer> ConnectAsync(ServerFactory factory, string name, params TestLevel[] levels) =>
+        ConnectAsync(factory, name, osuSkipVideo: false, levels);
+
+    public static async Task<TestPlayer> ConnectAsync(ServerFactory factory, string name, bool osuSkipVideo, params TestLevel[] levels)
     {
         var p = new TestPlayer(factory, name);
         p.Levels.AddRange(levels);
@@ -128,6 +158,7 @@ public sealed class TestPlayer : IAsyncDisposable
         var hello = await p.Hub.InvokeAsync<HelloResult>("Hello", new HelloRequest
         {
             PlayerId = p.PlayerId, Username = name, ColorHue = 120, ProtocolVersion = Protocol.Version,
+            OsuSkipVideo = osuSkipVideo,
         });
         Assert.True(hello.Ok, hello.Error);
         return p;

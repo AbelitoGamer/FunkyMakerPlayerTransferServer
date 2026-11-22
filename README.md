@@ -1,6 +1,6 @@
 # FunkyMaker Online Server
 
-ASP.NET Core (.NET 10) server for FunkyMakerPlayer's online mode (room system, protocol 2). It merges
+ASP.NET Core (.NET 10) server for FunkyMakerPlayer's online mode (room system, protocol 3). It merges
 the official game server (leaderboard, users, verified levels) with this repo's level transfers and
 replay exchange, and adds rooms:
 
@@ -8,12 +8,19 @@ replay exchange, and adds rooms:
 - **Rooms** (2-8 players): host (first in the list; the next player takes over if they leave), chat,
   kick (5 min ban), settings editable between rounds (announced in the chat).
 - **Settings**: game mode (Versus / Teams / Mirror), song selection (by turns / host only), password,
-  player limit, whether guests may pick their local levels.
+  player limit, whether guests may pick their local levels, song types (FNF only / osu!mania only /
+  FNF & osu!; official levels count as FNF).
 - **Rounds**: the player whose turn it is picks a song → everybody gets the level (official: download
   from `/api/verified_levels`; local: one holder uploads it once, everybody who lacks it downloads it)
   → players mark themselves ready (the picker is ready automatically, spectators don't count) →
   the match loads → when every player has loaded, a synced start time is sent → players report their
   result → the server ranks them, records the round and passes the turn on (spectators are skipped).
+- **osu!mania songs** (protocol 3): players list every 4K difficulty of their osu! sets (`Kind` = `osu`,
+  hash = the `.osu` file, plus set id / name / difficulty and the set's size with and without video).
+  The uploader packs the set as `.osz` on request, so its size and hash are only known after the
+  upload (`UploadTicket.ExactSize` = false, `TransferDownloadPacket.FileHash` = the package hash).
+  Players who set `HelloRequest.OsuSkipVideo` get the `novideo` variant: one transfer (and room
+  cache entry, key `hash:variant`) per variant needed.
 - **Modes**: Versus (exactly 2 players, random sides), Teams (random split; the higher *average*
   score wins), Mirror (everybody plays the same side, chosen by majority vote, ties random).
 - **Leaderboard**: pairwise ELO (K = 32 split over the comparisons; Teams compares only against the
@@ -82,8 +89,8 @@ Environment tab; saving redeploys the service.
 
 | Setting | Default | |
 |---|---|---|
-| `MaxUploadMegabytes` | 100 | Levels larger than this are not listed or accepted. |
-| `MaxLevelsPerMember` | 2000 | |
+| `MaxUploadMegabytes` | 250 | Levels larger than this are not listed or accepted (osu! sets: listed while the set without video fits). |
+| `MaxLevelsPerMember` | 5000 | Every osu! difficulty is an entry. |
 | `StallTimeoutSeconds` | 60 | |
 | `CacheMinutes` | 15 | Uploaded levels stay reusable in the room this long. |
 | `ProgressIntervalMs` | 200 | Room state throttle while downloading. |

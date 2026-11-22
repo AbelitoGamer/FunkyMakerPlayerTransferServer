@@ -9,7 +9,7 @@ services:
     autoDeploy: true
     envVars:
       - key: Transfer__MaxUploadMegabytes
-        value: "100"
+        value: "250"
       # Highest player limit hosts can set for a room (2-32)
       - key: Transfer__MaxRoomMembers
         value: "16"

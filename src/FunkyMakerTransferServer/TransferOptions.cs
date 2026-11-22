@@ -6,13 +6,13 @@ namespace FunkyMakerTransferServer;
 /// </summary>
 public sealed class TransferOptions
 {
-    public int MaxUploadMegabytes { get; set; } = 100;
+    public int MaxUploadMegabytes { get; set; } = 250;
     /// <summary>
     /// Highest player limit hosts can give their rooms (env <c>Transfer__MaxRoomMembers</c>), clamped
     /// to 2..<see cref="Protocol.HardMaxPlayers"/>. It used to be unused (always 8).
     /// </summary>
     public int MaxRoomMembers { get; set; } = Protocol.MaxPlayers;
-    public int MaxLevelsPerMember { get; set; } = 2000;
+    public int MaxLevelsPerMember { get; set; } = 5000; // osu! sets list every 4K difficulty
     /// <summary>A transfer with no progress for this long is cancelled.</summary>
     public int StallTimeoutSeconds { get; set; } = 60;
     /// <summary>How long an uploaded file stays reusable for the same room after its last use.</summary>

@@ -12,11 +12,124 @@ public sealed class RoomFlowTests : IDisposable
     // ── Session / browser ────────────────────────────────────────────────────
 
     [Fact]
-    public async Task Health_reports_protocol_2()
+    public async Task Health_reports_protocol_3()
     {
         using var http = _factory.CreateClient();
         var body = await http.GetStringAsync("/health");
-        Assert.Contains("\"protocol\":2", body);
+        Assert.Contains("\"protocol\":3", body);
+    }
+
+    [Fact]
+    public async Task Osu_set_is_packed_once_per_variant_and_sent_to_whoever_lacks_it()
+    {
+        var osu = TestLevel.Osu("Lagtrain", setSize: 3_000_000, sizeNoVideo: 1_000_000);
+        await using var a = await TestPlayer.ConnectAsync(_factory, "A", osu);
+        await using var b = await TestPlayer.ConnectAsync(_factory, "B");
+        await using var c = await TestPlayer.ConnectAsync(_factory, "C", osuSkipVideo: true);
+        string id = await a.CreateAsync(new RoomSettings { Mode = Protocol.ModeMirror, MaxPlayers = 4 });
+        await b.JoinAsync(id);
+        await c.JoinAsync(id);
+
+        var listed = (await b.WaitState(s => s.Levels?.Count == 1)).Levels!.Single();
+        Assert.Equal(Protocol.KindOsu, listed.Kind);
+        Assert.Equal("set-lagtrain", listed.SetId);
+        Assert.Equal("Hard", listed.Difficulty);
+        Assert.Equal(1_000_000, listed.SizeNoVideo);
+
+        Assert.True((await a.PickLocalAsync(osu)).Ok);
+        Assert.Equal(Protocol.KindOsu, a.State.Song!.Kind);
+
+        // B wants the full set, C the set without its video: one upload of each.
+        var full = await a.WaitFor<TransferUploadPacket>(Protocol.TransferUpload, u => u.Variant == Protocol.VariantFull);
+        var noVideo = await a.WaitFor<TransferUploadPacket>(Protocol.TransferUpload, u => u.Variant == Protocol.VariantNoVideo);
+        Assert.Equal(Protocol.KindOsu, full.Kind);
+        Assert.Equal(0, full.Size);
+        Assert.True(full.MaxSize > 3_000_000);
+        var fullBytes = TestLevel.Package(200_000);   // packed sizes differ from the estimates
+        var smallBytes = TestLevel.Package(50_000);
+        (await a.UploadAsync(full, fullBytes)).EnsureSuccessStatusCode();
+        (await a.UploadAsync(noVideo, smallBytes)).EnsureSuccessStatusCode();
+
+        foreach (var (p, expected, variant) in new[] { (b, fullBytes, Protocol.VariantFull), (c, smallBytes, Protocol.VariantNoVideo) })
+        {
+            var down = await p.WaitFor<TransferDownloadPacket>(Protocol.TransferDownload);
+            Assert.Equal(variant, down.Variant);
+            Assert.Equal(osu.Hash, down.Hash);
+            Assert.Equal(expected.Length, down.Size);
+            var bytes = await p.DownloadAsync(down);
+            Assert.Equal(Convert.ToHexStringLower(SHA256.HashData(expected)), down.FileHash);
+            Assert.Equal(down.FileHash, Convert.ToHexStringLower(SHA256.HashData(bytes)));
+            await p.Hub.InvokeAsync("CompleteDownload", down.TransferId, true, (string?)null);
+        }
+        Assert.Equal(2, a.All<TransferUploadPacket>(Protocol.TransferUpload).Count);
+
+        var s = await a.WaitState(x => x.Members.All(m => m.LevelStatus == Protocol.LevelReady));
+        var lvl = s.Levels!.Single();
+        Assert.Equal(2, lvl.Holders.Count);
+        Assert.Equal(Protocol.KindOsu, lvl.Kind);
+    }
+
+    [Fact]
+    public async Task Song_types_limit_what_can_be_picked()
+    {
+        var fnf = TestLevel.Create("Fnf");
+        var osu = TestLevel.Osu("Mania");
+        var official = _factory.Official.Add("Official");
+        await using var a = await TestPlayer.ConnectAsync(_factory, "A", fnf, osu);
+        await using var b = await TestPlayer.ConnectAsync(_factory, "B");
+        string id = await a.CreateAsync(new RoomSettings { Mode = Protocol.ModeMirror, MaxPlayers = 2, SongTypes = Protocol.SongTypesFnf });
+        await b.JoinAsync(id);
+
+        var st = await b.WaitState(s => s.Levels?.Count == 2);
+        Assert.Equal(Protocol.SongTypesFnf, st.Settings.SongTypes);
+        Assert.True(st.Levels!.Single(l => l.Kind == Protocol.KindFnf).Pickable);
+        Assert.False(st.Levels!.Single(l => l.Kind == Protocol.KindOsu).Pickable);
+        Assert.False((await a.PickLocalAsync(osu)).Ok);
+        Assert.True((await a.PickLocalAsync(fnf)).Ok);
+
+        var r = await a.Hub.InvokeAsync<OpResult>("UpdateSettings", new RoomSettings { Mode = Protocol.ModeMirror, MaxPlayers = 2, SongTypes = Protocol.SongTypesOsu });
+        Assert.True(r.Ok, r.Error);
+        await b.WaitChat("song types");
+        await b.WaitChat("cleared"); // the FNF pick is no longer allowed
+        Assert.False((await a.PickLocalAsync(fnf)).Ok);
+        var off = await a.Hub.InvokeAsync<OpResult>("SelectSong", new SongSelection { Source = Protocol.SourceOfficial, Hash = official.Hash });
+        Assert.False(off.Ok);
+        Assert.True((await a.PickLocalAsync(osu)).Ok);
+
+        // Unknown values fall back to both.
+        r = await a.Hub.InvokeAsync<OpResult>("UpdateSettings", new RoomSettings { Mode = Protocol.ModeMirror, MaxPlayers = 2, SongTypes = "weird" });
+        Assert.True(r.Ok, r.Error);
+        Assert.Equal(Protocol.SongTypesBoth, (await b.WaitState(s => s.Settings.SongTypes == Protocol.SongTypesBoth)).Settings.SongTypes);
+    }
+
+    [Fact]
+    public async Task Osu_songs_are_only_played_in_mirror_rooms()
+    {
+        var osu = TestLevel.Osu("Mania");
+        await using var a = await TestPlayer.ConnectAsync(_factory, "A", osu);
+        await using var b = await TestPlayer.ConnectAsync(_factory, "B");
+        string id = await a.CreateAsync(new RoomSettings { Mode = Protocol.ModeVersus, MaxPlayers = 2 });
+        await b.JoinAsync(id);
+
+        var st = await b.WaitState(s => s.Levels?.Count == 1);
+        Assert.False(st.Levels!.Single().Pickable);
+        var pick = await a.PickLocalAsync(osu);
+        Assert.False(pick.Ok);
+        Assert.Contains("Mirror", pick.Error);
+
+        // osu!mania only needs Mirror.
+        var bad = await a.Hub.InvokeAsync<OpResult>("UpdateSettings", new RoomSettings { Mode = Protocol.ModeVersus, MaxPlayers = 2, SongTypes = Protocol.SongTypesOsu });
+        Assert.False(bad.Ok);
+
+        var r = await a.Hub.InvokeAsync<OpResult>("UpdateSettings", new RoomSettings { Mode = Protocol.ModeMirror, MaxPlayers = 2 });
+        Assert.True(r.Ok, r.Error);
+        Assert.True((await b.WaitState(s => s.Levels?.SingleOrDefault()?.Pickable == true)).Levels!.Single().Pickable);
+        Assert.True((await a.PickLocalAsync(osu)).Ok);
+
+        // Leaving Mirror clears the osu! pick.
+        r = await a.Hub.InvokeAsync<OpResult>("UpdateSettings", new RoomSettings { Mode = Protocol.ModeTeams, MaxPlayers = 2 });
+        Assert.True(r.Ok, r.Error);
+        await b.WaitChat("cleared");
     }
 
     [Fact]

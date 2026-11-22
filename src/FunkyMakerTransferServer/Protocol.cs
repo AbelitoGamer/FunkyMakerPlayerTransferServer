@@ -6,8 +6,31 @@ namespace FunkyMakerTransferServer;
 
 public static class Protocol
 {
-    /// <summary>2 = room system (room list, waiting room, turns, N players). 1 was the old pair-transfer server.</summary>
-    public const int Version = 2;
+    /// <summary>
+    /// 3 = osu!mania songs (level kinds, room song types, packed set transfers with variants).
+    /// 2 = room system (room list, waiting room, turns, N players). 1 was the old pair-transfer server.
+    /// </summary>
+    public const int Version = 3;
+
+    // ── Level kinds ──────────────────────────────────────────────────────────
+    /// <summary>A Funky Maker level file (.fnmm / .zip / .rar).</summary>
+    public const string KindFnf = "fnf";
+    /// <summary>
+    /// One 4K difficulty of an osu!mania beatmap set. Hash = SHA-256 of its .osu file; what is sent
+    /// is the whole set packed as .osz (made by the uploader, so its size / hash are only known once
+    /// uploaded).
+    /// </summary>
+    public const string KindOsu = "osu";
+
+    // ── Room song types ──────────────────────────────────────────────────────
+    public const string SongTypesFnf = "fnf";
+    public const string SongTypesOsu = "osu";
+    public const string SongTypesBoth = "both";
+
+    // ── osu! set transfer variants ───────────────────────────────────────────
+    public const string VariantFull = "full";
+    /// <summary>The set without its video file(s) (players who chose to skip videos).</summary>
+    public const string VariantNoVideo = "novideo";
 
     // ── Server → client methods ──────────────────────────────────────────────
     public const string RoomState = "RoomState";
@@ -81,6 +104,8 @@ public sealed class HelloRequest
     public int ColorHue { get; set; } = 180;
     public string ClientVersion { get; set; } = "";
     public int ProtocolVersion { get; set; }
+    /// <summary>Receive osu! sets without their video (smaller downloads). Sent again when it changes.</summary>
+    public bool OsuSkipVideo { get; set; }
 }
 
 public sealed class HelloResult
@@ -123,15 +148,26 @@ public sealed class PongPacket
 /// <summary>One level a player has in their local levels folder.</summary>
 public sealed class LevelEntry
 {
-    /// <summary>Lower-case hex SHA-256 of the level file.</summary>
+    /// <summary>Lower-case hex SHA-256 of the level file (osu!: of the difficulty's .osu file).</summary>
     public string Hash { get; set; } = "";
     /// <summary>Display name (usually the file name without extension).</summary>
     public string Name { get; set; } = "";
-    /// <summary>File name with extension (.fnmm / .zip / .rar).</summary>
+    /// <summary>File name with extension (.fnmm / .zip / .rar; osu!: the set's name + .osz).</summary>
     public string FileName { get; set; } = "";
+    /// <summary>Bytes (osu!: about the size of the whole set packed).</summary>
     public long Size { get; set; }
     /// <summary>Star rating computed by the game (0 = unknown).</summary>
     public float Stars { get; set; }
+    /// <summary>fnf / osu.</summary>
+    public string Kind { get; set; } = Protocol.KindFnf;
+    /// <summary>osu!: identifies the beatmap set (its difficulties share it) — groups them in the song select.</summary>
+    public string SetId { get; set; } = "";
+    /// <summary>osu!: "Artist - Title".</summary>
+    public string SetName { get; set; } = "";
+    /// <summary>osu!: difficulty name.</summary>
+    public string Difficulty { get; set; } = "";
+    /// <summary>osu!: about the size of the set without its video; 0 = the set has no video.</summary>
+    public long SizeNoVideo { get; set; }
 }
 
 public sealed class RoomSettings
@@ -143,6 +179,8 @@ public sealed class RoomSettings
     public int MaxPlayers { get; set; } = 2;
     /// <summary>Guests may pick levels they (or other guests) have locally, not only official / host levels.</summary>
     public bool AllowGuestLocalLevels { get; set; } = true;
+    /// <summary>Songs that may be picked: fnf (official + FNF levels) / osu (osu!mania) / both.</summary>
+    public string SongTypes { get; set; } = Protocol.SongTypesBoth;
 }
 
 public sealed class CreateRoomRequest
@@ -195,6 +233,13 @@ public sealed class SongInfo
     public float Stars { get; set; }
     /// <summary>Player who picked it.</summary>
     public string PickedBy { get; set; } = "";
+    /// <summary>fnf / osu (official levels are fnf).</summary>
+    public string Kind { get; set; } = Protocol.KindFnf;
+    /// <summary>osu!: see <see cref="LevelEntry"/>.</summary>
+    public string SetId { get; set; } = "";
+    public string SetName { get; set; } = "";
+    public string Difficulty { get; set; } = "";
+    public long SizeNoVideo { get; set; }
 }
 
 public sealed class RoomMember
@@ -226,8 +271,14 @@ public sealed class RoomLevel
     public bool YouHave { get; set; }
     /// <summary>Ids of the other players who have this exact file.</summary>
     public List<string> Holders { get; set; } = new();
-    /// <summary>You may pick it on your turn (host's level, or guest levels allowed).</summary>
+    /// <summary>You may pick it on your turn (host's level, or guest levels allowed; and its kind allowed).</summary>
     public bool Pickable { get; set; }
+    /// <summary>fnf / osu, and the osu! set info (see <see cref="LevelEntry"/>).</summary>
+    public string Kind { get; set; } = Protocol.KindFnf;
+    public string SetId { get; set; } = "";
+    public string SetName { get; set; } = "";
+    public string Difficulty { get; set; } = "";
+    public long SizeNoVideo { get; set; }
 }
 
 public sealed class MatchAssignment
@@ -355,17 +406,27 @@ public sealed class TransferUploadPacket
     public string Token { get; set; } = "";
     public string Hash { get; set; } = "";
     public string FileName { get; set; } = "";
+    /// <summary>Exact size to upload (fnf). osu!: 0 — the packed set may be up to <see cref="MaxSize"/>.</summary>
     public long Size { get; set; }
+    public string Kind { get; set; } = Protocol.KindFnf;
+    /// <summary>osu!: full / novideo.</summary>
+    public string Variant { get; set; } = Protocol.VariantFull;
+    public long MaxSize { get; set; }
 }
 
 public sealed class TransferDownloadPacket
 {
     public string TransferId { get; set; } = "";
     public string Token { get; set; } = "";
+    /// <summary>The level (osu!: the .osu difficulty's hash, found in the set after importing it).</summary>
     public string Hash { get; set; } = "";
     public string Name { get; set; } = "";
     public string FileName { get; set; } = "";
     public long Size { get; set; }
+    public string Kind { get; set; } = Protocol.KindFnf;
+    public string Variant { get; set; } = Protocol.VariantFull;
+    /// <summary>SHA-256 of the file to download (= Hash for fnf; the packed .osz for osu!).</summary>
+    public string FileHash { get; set; } = "";
 }
 
 public sealed class TransferFailedPacket
