@@ -53,7 +53,7 @@ public sealed record OfficialLevel(string Id, string Name, string FileName, stri
 /// </summary>
 public sealed partial class RoomRegistry
 {
-    public static readonly TimeSpan LoadingTimeout = TimeSpan.FromSeconds(60);
+    public static readonly TimeSpan LoadingTimeout = TimeSpan.FromSeconds(100);
     public static readonly TimeSpan FinishGrace = TimeSpan.FromSeconds(30);
     public static readonly TimeSpan KickBan = TimeSpan.FromMinutes(5);
     /// <summary>A match player who sends nothing for this long (after the song start) has left it.</summary>
