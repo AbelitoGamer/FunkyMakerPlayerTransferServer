@@ -36,7 +36,7 @@ builder.Services.AddSignalR(o =>
 {
     o.MaximumReceiveMessageSize = 4 * 1024 * 1024; // level lists (with every osu! difficulty) can be ~1-2 MB
     o.KeepAliveInterval = TimeSpan.FromSeconds(10);
-    o.ClientTimeoutInterval = TimeSpan.FromSeconds(60);
+    o.ClientTimeoutInterval = TimeSpan.FromSeconds(30);
     o.EnableDetailedErrors = builder.Environment.IsDevelopment();
 });
 

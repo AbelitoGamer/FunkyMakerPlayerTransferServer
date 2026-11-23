@@ -256,6 +256,8 @@ public sealed class RoomMember
     public string LevelStatus { get; set; } = Protocol.LevelMissing;
     /// <summary>0-1 download progress when downloading.</summary>
     public float LevelProgress { get; set; }
+    /// <summary>0-1 while this member uploads the round's level for the room, otherwise -1.</summary>
+    public float UploadProgress { get; set; } = -1f;
     /// <summary>Mirror vote for the current song: -1 none, 0 player, 1 enemy.</summary>
     public int Vote { get; set; } = -1;
 }

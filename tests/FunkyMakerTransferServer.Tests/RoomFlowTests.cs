@@ -334,7 +334,7 @@ public sealed class RoomFlowTests : IDisposable
     }
 
     [Fact]
-    public async Task Host_forcestart_starts_without_the_others_pressing_ready()
+    public async Task Forcestart_is_gone_and_just_a_chat_message()
     {
         var lvl = TestLevel.Create("Forced");
         await using var a = await TestPlayer.ConnectAsync(_factory, "A", lvl);
@@ -346,43 +346,113 @@ public sealed class RoomFlowTests : IDisposable
 
         await a.Hub.InvokeAsync("SendChat", "/forcestart");
 
-        var info = await b.WaitFor<MatchInfo>(Protocol.MatchLoading);
-        Assert.Equal(2, info.Players.Count);
-        await b.WaitChat("force-started");
-        Assert.DoesNotContain(b.All<ChatMessage>(Protocol.Chat), c => c.Text == "/forcestart");
+        await b.WaitChat("/forcestart");
+        Assert.Empty(b.All<MatchInfo>(Protocol.MatchLoading));
     }
 
     [Fact]
-    public async Task Forcestart_is_host_only()
+    public async Task A_picked_song_cannot_be_changed()
     {
-        var lvl = TestLevel.Create("NotHost");
+        var one = TestLevel.Create("One");
+        var two = TestLevel.Create("Two");
+        await using var a = await TestPlayer.ConnectAsync(_factory, "A", one, two);
+        await using var b = await TestPlayer.ConnectAsync(_factory, "B");
+        string id = await a.CreateAsync();
+        await b.JoinAsync(id);
+        Assert.True((await a.PickLocalAsync(one)).Ok);
+        var again = await a.PickLocalAsync(two);
+        Assert.False(again.Ok);
+        Assert.Contains("can't be changed", again.Error);
+        Assert.Equal(one.Hash, (await b.WaitState(s => s.Song != null)).Song!.Hash);
+    }
+
+    [Fact]
+    public async Task Quitting_while_loading_takes_the_player_out_of_the_match()
+    {
+        var lvl = TestLevel.Create("Lvl");
+        await using var a = await TestPlayer.ConnectAsync(_factory, "A", lvl);
+        await using var b = await TestPlayer.ConnectAsync(_factory, "B", lvl);
+        await using var c = await TestPlayer.ConnectAsync(_factory, "C", lvl);
+        string id = await a.CreateAsync(new RoomSettings { Mode = Protocol.ModeMirror, MaxPlayers = 3 });
+        await b.JoinAsync(id);
+        await c.JoinAsync(id);
+        Assert.True((await a.PickLocalAsync(lvl)).Ok);
+        await b.ReadyAsync();
+        await c.ReadyAsync();
+        var info = await a.WaitFor<MatchInfo>(Protocol.MatchLoading);
+        await a.Hub.InvokeAsync("MatchLoaded", info.MatchId);
+        await c.Hub.InvokeAsync("MatchLoaded", info.MatchId);
+
+        // B quits before loading: the others start without waiting for the loading timeout.
+        await b.Hub.InvokeAsync("FinishMatch", new FinishMatchRequest { MatchId = info.MatchId, Quit = true });
+        await a.WaitFor<MatchStartPacket>(Protocol.MatchStart);
+        var st = await a.WaitState(x => x.Phase == Protocol.PhasePlaying);
+        Assert.Equal(Protocol.StatusSpectating, st.Members.Single(m => m.Id == b.PlayerId).Status);
+        Assert.DoesNotContain(st.Match!.Players, p => p.PlayerId == b.PlayerId);
+    }
+
+    [Fact]
+    public async Task Silent_player_is_dropped_and_the_round_ends()
+    {
+        var lvl = TestLevel.Create("Lvl");
         await using var a = await TestPlayer.ConnectAsync(_factory, "A", lvl);
         await using var b = await TestPlayer.ConnectAsync(_factory, "B", lvl);
         string id = await a.CreateAsync();
         await b.JoinAsync(id);
         Assert.True((await a.PickLocalAsync(lvl)).Ok);
-        await a.WaitState(x => x.Members.All(m => m.LevelStatus == Protocol.LevelReady));
+        await b.ReadyAsync();
+        var info = await a.WaitFor<MatchInfo>(Protocol.MatchLoading);
+        await a.Hub.InvokeAsync("MatchLoaded", info.MatchId);
+        await b.Hub.InvokeAsync("MatchLoaded", info.MatchId);
+        await a.WaitFor<MatchStartPacket>(Protocol.MatchStart);
 
-        await b.Hub.InvokeAsync("SendChat", "/forcestart");
-
-        await b.WaitChat("Only the host");
-        Assert.Empty(a.All<MatchInfo>(Protocol.MatchLoading));
+        // A finishes; B (still connected) never sends anything again, like a crashed game.
+        await a.Hub.InvokeAsync("FinishMatch", new FinishMatchRequest { MatchId = info.MatchId, Score = 100, Sicks = 1 });
+        int wait = (int)(RoomRegistry.SilenceTimeout.TotalMilliseconds + RoomRegistry.CountdownMs + 8000);
+        await a.WaitChat("stopped responding", wait);
+        var result = await a.WaitFor<RoundResult>(Protocol.MatchResults);
+        Assert.True(result.Players.Single(p => p.Username == "B").Disconnected);
+        Assert.Equal(Protocol.PhaseLobby, (await a.WaitState(x => x.Phase == Protocol.PhaseLobby)).Phase);
     }
 
     [Fact]
-    public async Task Forcestart_still_needs_everybody_to_have_the_level()
+    public async Task Nothing_judged_is_0_percent_not_100()
     {
-        var lvl = TestLevel.Create("Missing");
+        var lvl = TestLevel.Create("Lvl");
+        await using var a = await TestPlayer.ConnectAsync(_factory, "A", lvl);
+        await using var b = await TestPlayer.ConnectAsync(_factory, "B", lvl);
+        string id = await a.CreateAsync();
+        await b.JoinAsync(id);
+        Assert.True((await a.PickLocalAsync(lvl)).Ok);
+        await b.ReadyAsync();
+        var info = await a.WaitFor<MatchInfo>(Protocol.MatchLoading);
+        await a.Hub.InvokeAsync("MatchLoaded", info.MatchId);
+        await b.Hub.InvokeAsync("MatchLoaded", info.MatchId);
+        await a.WaitFor<MatchStartPacket>(Protocol.MatchStart);
+
+        // An old client reports 100 % for an empty chart.
+        await a.Hub.InvokeAsync("FinishMatch", new FinishMatchRequest { MatchId = info.MatchId, Score = 0, Accuracy = 100 });
+        await b.Hub.InvokeAsync("FinishMatch", new FinishMatchRequest { MatchId = info.MatchId, Score = 50, Accuracy = 90, Sicks = 9, Misses = 1 });
+        var result = await a.WaitFor<RoundResult>(Protocol.MatchResults);
+        Assert.Equal(0f, result.Players.Single(p => p.Username == "A").Accuracy);
+        Assert.Equal(90f, result.Players.Single(p => p.Username == "B").Accuracy);
+    }
+
+    [Fact]
+    public async Task Upload_progress_is_its_own_field()
+    {
+        var lvl = TestLevel.Create("Lvl");
         await using var a = await TestPlayer.ConnectAsync(_factory, "A", lvl);
         await using var b = await TestPlayer.ConnectAsync(_factory, "B");
         string id = await a.CreateAsync();
         await b.JoinAsync(id);
         Assert.True((await a.PickLocalAsync(lvl)).Ok);
-
-        await a.Hub.InvokeAsync("SendChat", "/forcestart");
-
-        await a.WaitChat("can't start yet");
-        Assert.Empty(a.All<MatchInfo>(Protocol.MatchLoading));
+        // The uploader has the level (ready, 100 %) and an upload in progress (0 %).
+        var st = await b.WaitState(x => x.Members.Single(m => m.Id == a.PlayerId).UploadProgress >= 0f);
+        var am = st.Members.Single(m => m.Id == a.PlayerId);
+        Assert.Equal(Protocol.LevelReady, am.LevelStatus);
+        Assert.Equal(1f, am.LevelProgress);
+        Assert.Equal(-1f, st.Members.Single(m => m.Id == b.PlayerId).UploadProgress);
     }
 
     [Fact]

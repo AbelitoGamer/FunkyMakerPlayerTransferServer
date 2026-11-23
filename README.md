@@ -59,6 +59,12 @@ return; the client buffers them.
 |---|---|
 | Loading | 60 s; players who haven't loaded become spectators (round cancelled if fewer than 2 remain). |
 | Finishing | 30 s after the first player finishes; missing players are ranked with their last live state. |
+| Silence | A match player who sends no state / hit / key press for 10 s after the song start is out of the match ("stopped responding"); the round ends as soon as everybody left is done. |
+| Connection | SignalR client timeout 30 s (keep-alive 10 s). |
+
+Picks are final: `SelectSong` fails while a song is picked (the server clears a pick when the picker
+leaves or spectates, or new settings disallow it). `FinishMatch` with `Quit` also works while loading.
+`RoomMember.UploadProgress` (0-1, -1 = none) is the member's upload of the round's level.
 | Transfers | `StallTimeoutSeconds` (60) without progress; a failed upload tries the next holder. |
 
 ## HTTP

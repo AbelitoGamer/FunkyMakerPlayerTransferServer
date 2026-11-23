@@ -56,6 +56,8 @@ public sealed partial class RoomRegistry
     public static readonly TimeSpan LoadingTimeout = TimeSpan.FromSeconds(60);
     public static readonly TimeSpan FinishGrace = TimeSpan.FromSeconds(30);
     public static readonly TimeSpan KickBan = TimeSpan.FromMinutes(5);
+    /// <summary>A match player who sends nothing for this long (after the song start) has left it.</summary>
+    public static readonly TimeSpan SilenceTimeout = TimeSpan.FromSeconds(10);
     public static readonly TimeSpan ChatInterval = TimeSpan.FromMilliseconds(300);
     public const int MaxChatHistory = 60;
     public const int MaxRoundHistory = 50;
@@ -372,11 +374,6 @@ public sealed partial class RoomRegistry
             var now = Now;
             if (now - m.LastChat < ChatInterval) return;
             m.LastChat = now;
-            if (clean.Equals("/forcestart", StringComparison.OrdinalIgnoreCase))
-            {
-                ForceStartLocked(m, fx);
-                return;
-            }
             AddChatLocked(m.Room, new ChatMessage
             {
                 PlayerId = m.Session.PlayerId,
@@ -386,41 +383,6 @@ public sealed partial class RoomRegistry
                 Timestamp = NowMs,
             }, fx);
         }
-    }
-
-    /// <summary>
-    /// Host chat command "/forcestart": marks every playing member who has the level as ready,
-    /// then starts the round if nothing else blocks it (workaround for clients whose Ready
-    /// button doesn't work). Players still need the level; the reason is posted if it can't start.
-    /// </summary>
-    private void ForceStartLocked(Member m, Effects fx)
-    {
-        var room = m.Room;
-        if (room.Host != m)
-        {
-            AddSystemChatLocked(room, "Only the host can use /forcestart.", fx);
-            return;
-        }
-        if (room.Phase != Protocol.PhaseSongSelected || room.Song == null)
-        {
-            AddSystemChatLocked(room, "/forcestart: no song is waiting to start.", fx);
-            return;
-        }
-
-        foreach (var p in ActivePlayers(room))
-            if (p.LevelState == Protocol.LevelReady) p.Ready = true;
-
-        string? blocker = StartBlockerLocked(room);
-        if (blocker != null)
-        {
-            AddSystemChatLocked(room, $"/forcestart: can't start yet. {blocker}.", fx);
-            BroadcastRoomLocked(room, fx);
-            return;
-        }
-
-        AddSystemChatLocked(room, $"{m.Session.Username} force-started the round.", fx);
-        TryAdvanceRoundLocked(room, fx);
-        BroadcastRoomLocked(room, fx);
     }
 
     public void SetSpectate(string connectionId, bool spectate, Effects fx)
@@ -465,6 +427,9 @@ public sealed partial class RoomRegistry
                 return OpResult.Fail("Wait for the current round to end.");
             EnsureTurnLocked(room);
             if (room.TurnMember != m) return OpResult.Fail("It's not your turn to pick.");
+            // A pick is final (the picker used to be able to keep switching songs). It's only
+            // cleared by the server: the picker leaves / spectates, or new settings disallow it.
+            if (room.Song != null) return OpResult.Fail("A song was already picked for this round. It can't be changed.");
 
             string hash = (selection.Hash ?? "").Trim().ToLowerInvariant();
             if (!HashRegex().IsMatch(hash)) return OpResult.Fail("Invalid level.");
@@ -620,7 +585,10 @@ public sealed partial class RoomRegistry
         {
             if (!TryMember(connectionId, out var m)) return false;
             var room = m.Room;
-            if (room.Match == null || !room.Match.Participants.ContainsKey(m.Session.PlayerId)) return false;
+            if (room.Match == null || !room.Match.Participants.TryGetValue(m.Session.PlayerId, out var p)) return false;
+            // Someone who finished or quit no longer drives anybody's strumline.
+            if (p.Final != null) return false;
+            p.LastSeen = Now;
             playerId = m.Session.PlayerId;
             foreach (var o in room.Members)
                 if (o != m) targets.Add(o.Session.ConnectionId);
@@ -635,7 +603,10 @@ public sealed partial class RoomRegistry
         {
             if (!TryMember(connectionId, out var m) || m.Room.Match == null) return;
             if (m.Room.Match.Participants.TryGetValue(m.Session.PlayerId, out var p) && p.Final == null)
+            {
                 p.Last = state;
+                p.LastSeen = Now;
+            }
         }
     }
 
@@ -646,8 +617,31 @@ public sealed partial class RoomRegistry
             if (!TryMember(connectionId, out var m)) return;
             var room = m.Room;
             var match = room.Match;
-            if (match == null || match.Info.MatchId != request.MatchId || room.Phase != Protocol.PhasePlaying) return;
+            if (match == null || match.Info.MatchId != request.MatchId) return;
             if (!match.Participants.TryGetValue(m.Session.PlayerId, out var p) || p.Final != null) return;
+
+            if (room.Phase == Protocol.PhaseLoading)
+            {
+                // Quit before the song started (loading / countdown): out of the match like a
+                // player who left the room while loading (this used to be ignored, and the round
+                // kept waiting for them).
+                if (!request.Quit) return;
+                match.Participants.Remove(m.Session.PlayerId);
+                match.Loaded.Remove(m.Session.PlayerId);
+                match.Info.Loaded = match.Loaded.ToList();
+                AddSystemChatLocked(room, $"{m.Session.Username} left the match.", fx);
+                if (!TryStartMatchLocked(room, fx) && match.Participants.Count < MinParticipants(match.Info.Mode))
+                    CancelMatchLocked(room, fx, "Not enough players left. Round cancelled.");
+                else
+                    BroadcastRoomLocked(room, fx);
+                return;
+            }
+            if (room.Phase != Protocol.PhasePlaying) return;
+
+            // 100 % has to be earned: nothing judged (an empty chart on their side, or not playing)
+            // is 0 %, not a perfect run (old clients reported 100 % for it).
+            if (request.Sicks + request.Goods + request.Bads + request.Shits + request.Misses == 0)
+                request.Accuracy = 0f;
             p.Final = request;
             if (request.Quit)
             {
@@ -885,6 +879,35 @@ public sealed partial class RoomRegistry
                 {
                     FinishRoundLocked(room, fx);
                 }
+                else if (match != null && room.Phase == Protocol.PhasePlaying)
+                {
+                    // Players send their state several times a second while the song plays. One who
+                    // has been silent for a while crashed, closed the game or is back in the room
+                    // without the match: they're out (the SignalR timeout alone took up to a minute,
+                    // and a player who reconnected from a restarted game was never noticed).
+                    var silent = match.Participants.Values
+                        .Where(p => p.Final == null && !p.Gone && now - p.LastSeen > SilenceTimeout)
+                        .ToList();
+                    foreach (var p in silent)
+                    {
+                        p.Gone = true;
+                        string name = room.Members.FirstOrDefault(x => x.Session.PlayerId == p.Assignment.PlayerId)?.Session.Username
+                                      ?? match.Names.GetValueOrDefault(p.Assignment.PlayerId, "A player");
+                        AddSystemChatLocked(room, $"{name} stopped responding and left the match.", fx);
+                    }
+                    if (silent.Count > 0)
+                    {
+                        if (match.Participants.Values.All(x => x.Final != null || x.Gone))
+                            FinishRoundLocked(room, fx);
+                        else
+                            BroadcastRoomLocked(room, fx);
+                    }
+                }
+
+                // Progress packets skipped by the throttle: send the latest values now, so every
+                // member ends up seeing the same (last) percentages.
+                if (room.ProgressDirty && (now - room.LastProgressBroadcast).TotalMilliseconds >= _options.ProgressIntervalMs)
+                    BroadcastRoomLocked(room, fx);
 
                 foreach (var (key, file) in room.Cache.ToList())
                 {
@@ -1243,6 +1266,9 @@ public sealed partial class RoomRegistry
         // Drop assignments of players who were removed while loading.
         match.Info.Players.RemoveAll(a => !match.Participants.ContainsKey(a.PlayerId));
         room.Phase = Protocol.PhasePlaying;
+        // Silence is counted from the song start (nothing is sent during the countdown).
+        var songStart = DateTimeOffset.FromUnixTimeMilliseconds(match.Info.StartTimestamp);
+        foreach (var p in match.Participants.Values) p.LastSeen = songStart;
 
         var packet = new MatchStartPacket { MatchId = match.Info.MatchId, StartTimestamp = match.Info.StartTimestamp };
         foreach (var m in room.Members)
@@ -1566,7 +1592,7 @@ public sealed partial class RoomRegistry
     private bool ProgressBroadcastDue(Room room)
     {
         var now = Now;
-        if ((now - room.LastProgressBroadcast).TotalMilliseconds < _options.ProgressIntervalMs) return false;
+        if ((now - room.LastProgressBroadcast).TotalMilliseconds < _options.ProgressIntervalMs) { room.ProgressDirty = true; return false; }
         room.LastProgressBroadcast = now;
         return true;
     }
@@ -1593,6 +1619,7 @@ public sealed partial class RoomRegistry
     {
         if (!_rooms.ContainsKey(room.Id)) return;
         room.LastProgressBroadcast = Now;
+        room.ProgressDirty = false;
         string? blocker = StartBlockerLocked(room);
         var turn = room.TurnMember;
         bool inMatch = room.Phase is Protocol.PhaseLoading or Protocol.PhasePlaying;
@@ -1608,12 +1635,11 @@ public sealed partial class RoomRegistry
                     : Protocol.StatusSpectating)
                 : m.Spectate ? Protocol.StatusSpectating
                 : m.Ready ? Protocol.StatusReady : Protocol.StatusNotReady;
-            bool uploading = m.UploadProgress >= 0f;
             return new RoomMember
             {
                 Id = id, Username = m.Session.Username, ColorHue = m.Session.ColorHue, IsHost = m == room.Host,
                 Status = status, Spectate = m.Spectate,
-                LevelStatus = m.LevelState, LevelProgress = uploading ? m.UploadProgress : m.LevelProgress, Vote = m.Vote,
+                LevelStatus = m.LevelState, LevelProgress = m.LevelProgress, UploadProgress = m.UploadProgress, Vote = m.Vote,
             };
         }).ToList();
 
@@ -1847,6 +1873,8 @@ public sealed partial class RoomRegistry
         public Dictionary<string, DateTimeOffset> Bans { get; } = new(StringComparer.Ordinal);
         public Dictionary<string, CachedFile> Cache { get; } = new(StringComparer.Ordinal);
         public DateTimeOffset LastProgressBroadcast { get; set; }
+        /// <summary>A progress change wasn't broadcast yet (throttled); the sweep sends it.</summary>
+        public bool ProgressDirty { get; set; }
         /// <summary>Bumped whenever the room's level list or pickability changes.</summary>
         public int LevelsVersion { get; set; } = 1;
         public int HistoryVersion { get; set; } = 1;
@@ -1886,8 +1914,10 @@ public sealed partial class RoomRegistry
         public MatchAssignment Assignment { get; } = assignment;
         public FinishMatchRequest? Final { get; set; }
         public PlayerStatePacket? Last { get; set; }
-        /// <summary>Left the room during the match.</summary>
+        /// <summary>Left the room during the match (or stopped sending anything).</summary>
         public bool Gone { get; set; }
+        /// <summary>Last state / hit / key press from them (silence = they're out).</summary>
+        public DateTimeOffset LastSeen { get; set; }
     }
 
     private sealed class CachedFile(string path, long size, string fileHash)

@@ -77,12 +77,12 @@ public sealed class EffectRunner(IHubContext<RoomHub> hub, TransferStore store, 
     }
 }
 
-/// <summary>Every second: timeouts (transfers, loading, finishing) and cached file expiry.</summary>
+/// <summary>Every 250 ms: timeouts (transfers, loading, finishing) and cached file expiry.</summary>
 public sealed class SweepService(RoomRegistry registry, EffectRunner runner, ILogger<SweepService> log) : BackgroundService
 {
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
-        using var timer = new PeriodicTimer(TimeSpan.FromSeconds(1));
+        using var timer = new PeriodicTimer(TimeSpan.FromMilliseconds(250));
         while (await timer.WaitForNextTickAsync(stoppingToken))
         {
             try
