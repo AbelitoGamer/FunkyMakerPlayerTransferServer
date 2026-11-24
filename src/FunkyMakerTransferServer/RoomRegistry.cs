@@ -19,6 +19,7 @@ public sealed class Effects
     public List<CancellationTokenSource> ToCancel { get; } = new();
     public List<string> FilesToDelete { get; } = new();
     public List<RoundResult> RoundsToRecord { get; } = new();
+    public bool HasWork => Messages.Count > 0 || ToCancel.Count > 0 || FilesToDelete.Count > 0 || RoundsToRecord.Count > 0;
 
     internal void Send(string connectionId, string method, object payload) =>
         Messages.Add(new Outbound(connectionId, method, payload));
@@ -53,7 +54,7 @@ public sealed record OfficialLevel(string Id, string Name, string FileName, stri
 /// </summary>
 public sealed partial class RoomRegistry
 {
-    public static readonly TimeSpan LoadingTimeout = TimeSpan.FromSeconds(100);
+    public static readonly TimeSpan LoadingTimeout = TimeSpan.FromSeconds(150);
     public static readonly TimeSpan FinishGrace = TimeSpan.FromSeconds(30);
     public static readonly TimeSpan KickBan = TimeSpan.FromMinutes(5);
     /// <summary>A match player who sends nothing for this long (after the song start) has left it.</summary>
@@ -794,6 +795,22 @@ public sealed partial class RoomRegistry
         }
     }
 
+    /// <summary>
+    /// Kestrel finished writing every byte to the HTTP response (a reverse proxy like Render may still
+    /// be forwarding those bytes to a slow client). Switch this download to the longer completion grace.
+    /// </summary>
+    public void MarkDownloadStreamComplete(string transferId, string token)
+    {
+        lock (_lock)
+        {
+            if (!_transfers.TryGetValue(transferId, out var t)) return;
+            var d = t.Downloads.Values.FirstOrDefault(x => x.Token == token);
+            if (d == null) return;
+            d.StreamCompleted = true;
+            d.LastActivity = Now;
+        }
+    }
+
     // ══════════════════════════════════════════════════════════════════════
     // Transfers (hub side)
     // ══════════════════════════════════════════════════════════════════════
@@ -804,8 +821,12 @@ public sealed partial class RoomRegistry
         lock (_lock)
         {
             if (!TryMember(connectionId, out var m)) return;
-            if (!_transfers.TryGetValue(transferId, out var t) || !t.Downloads.Remove(m.Session.PlayerId, out var d)) return;
-            fx.ToCancel.Add(d.Cts);
+            if (!_transfers.TryGetValue(transferId, out var t) || t.Room != m.Room) return;
+            bool hadPending = t.Downloads.Remove(m.Session.PlayerId, out var d);
+            if (hadPending && d != null) fx.ToCancel.Add(d.Cts);
+            // If a slow client still finished downloading & verifying the file after Sweep expired the
+            // pending download entry, still accept ok=true so the player becomes LevelReady.
+            if (!hadPending && !ok) return;
             if (ok)
             {
                 m.Levels[t.Hash] = new LevelEntry
@@ -842,6 +863,7 @@ public sealed partial class RoomRegistry
         {
             var now = Now;
             var stall = TimeSpan.FromSeconds(_options.StallTimeoutSeconds);
+            var downloadGrace = TimeSpan.FromSeconds(Math.Max(_options.StallTimeoutSeconds, _options.DownloadCompletionGraceSeconds));
 
             foreach (var t in _transfers.Values.ToList())
             {
@@ -851,7 +873,7 @@ public sealed partial class RoomRegistry
                         FailTransferLocked(t, fx, "The level upload timed out.", tryNextHolder: true);
                     continue;
                 }
-                foreach (var d in t.Downloads.Values.Where(d => now - d.LastActivity > stall).ToList())
+                foreach (var d in t.Downloads.Values.Where(d => now - d.LastActivity > (d.StreamCompleted ? downloadGrace : stall)).ToList())
                 {
                     t.Downloads.Remove(d.PlayerId);
                     fx.ToCancel.Add(d.Cts);
@@ -1964,6 +1986,7 @@ public sealed partial class RoomRegistry
         public string Token { get; } = token;
         public CancellationTokenSource Cts { get; } = new();
         public long Bytes { get; set; }
+        public bool StreamCompleted { get; set; }
         public DateTimeOffset LastActivity { get; set; }
     }
 }
