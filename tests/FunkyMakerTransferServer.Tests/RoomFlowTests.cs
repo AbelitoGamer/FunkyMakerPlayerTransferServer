@@ -740,6 +740,93 @@ public sealed class RoomFlowTests : IDisposable
         Assert.False(msg.System);
     }
 
+    [Fact]
+    public async Task Slow_download_uses_completion_grace_after_server_stream_finishes()
+    {
+        using var factory = new ServerFactory();
+        factory.Settings["Transfer:StallTimeoutSeconds"] = "1";
+        factory.Settings["Transfer:DownloadCompletionGraceSeconds"] = "10";
+        var lvl = TestLevel.Create("SlowPhone", 200_000);
+        await using var a = await TestPlayer.ConnectAsync(factory, "A", lvl);
+        await using var b = await TestPlayer.ConnectAsync(factory, "B");
+        string id = await a.CreateAsync();
+        await b.JoinAsync(id);
+
+        Assert.True((await a.PickLocalAsync(lvl)).Ok);
+        var up = await a.WaitFor<TransferUploadPacket>(Protocol.TransferUpload);
+        (await a.UploadAsync(up, lvl.Bytes)).EnsureSuccessStatusCode();
+        var down = await b.WaitFor<TransferDownloadPacket>(Protocol.TransferDownload);
+        var bytes = await b.DownloadAsync(down);
+        Assert.Equal(lvl.Hash, Convert.ToHexStringLower(SHA256.HashData(bytes)));
+
+        // Exceed StallTimeoutSeconds (1 s) while still within DownloadCompletionGraceSeconds (10 s).
+        await Task.Delay(1500);
+        Assert.Empty(b.All<TransferFailedPacket>(Protocol.TransferFailed));
+
+        await b.Hub.InvokeAsync("CompleteDownload", down.TransferId, true, (string?)null);
+        var st = await a.WaitState(x => x.Members.Any(m => m.Id == b.PlayerId && m.LevelStatus == Protocol.LevelReady));
+        Assert.Equal(Protocol.LevelReady, st.Members.Single(m => m.Id == b.PlayerId).LevelStatus);
+    }
+
+    [Fact]
+    public async Task Late_complete_download_after_sweep_still_recovers_player_to_ready()
+    {
+        using var factory = new ServerFactory();
+        factory.Settings["Transfer:StallTimeoutSeconds"] = "1";
+        factory.Settings["Transfer:DownloadCompletionGraceSeconds"] = "1";
+        var lvl = TestLevel.Create("LateFinish", 200_000);
+        await using var a = await TestPlayer.ConnectAsync(factory, "A", lvl);
+        await using var b = await TestPlayer.ConnectAsync(factory, "B");
+        string id = await a.CreateAsync();
+        await b.JoinAsync(id);
+
+        Assert.True((await a.PickLocalAsync(lvl)).Ok);
+        var up = await a.WaitFor<TransferUploadPacket>(Protocol.TransferUpload);
+        (await a.UploadAsync(up, lvl.Bytes)).EnsureSuccessStatusCode();
+        var down = await b.WaitFor<TransferDownloadPacket>(Protocol.TransferDownload);
+        _ = await b.DownloadAsync(down);
+
+        // Wait until Sweep expires the download and sends TransferFailed.
+        await b.WaitFor<TransferFailedPacket>(Protocol.TransferFailed, timeoutMs: 4000);
+
+        // Even after Sweep expired it, a valid CompleteDownload(ok: true) still marks B ready.
+        await b.Hub.InvokeAsync("CompleteDownload", down.TransferId, true, (string?)null);
+        var st = await a.WaitState(x => x.Members.Any(m => m.Id == b.PlayerId && m.LevelStatus == Protocol.LevelReady));
+        Assert.Equal(Protocol.LevelReady, st.Members.Single(m => m.Id == b.PlayerId).LevelStatus);
+    }
+
+    [Fact]
+    public async Task Truncated_upload_reports_early_end_instead_of_file_changed()
+    {
+        var lvl = TestLevel.Create("Truncated", 200_000);
+        await using var a = await TestPlayer.ConnectAsync(_factory, "A", lvl);
+        await using var b = await TestPlayer.ConnectAsync(_factory, "B");
+        string id = await a.CreateAsync();
+        await b.JoinAsync(id);
+
+        Assert.True((await a.PickLocalAsync(lvl)).Ok);
+        var up = await a.WaitFor<TransferUploadPacket>(Protocol.TransferUpload);
+        // Announce the full expected Content-Length but close the body after half the bytes.
+        using var http = _factory.CreateClient();
+        using var req = new HttpRequestMessage(HttpMethod.Put, $"/api/transfers/{up.TransferId}/file")
+        {
+            Content = new TruncatedContent(lvl.Bytes, lvl.Bytes.Length / 2),
+        };
+        req.Headers.Add(Protocol.TokenHeader, up.Token);
+        var resp = await http.SendAsync(req);
+        Assert.Equal(System.Net.HttpStatusCode.BadRequest, resp.StatusCode);
+
+        var failed = await b.WaitFor<TransferFailedPacket>(Protocol.TransferFailed);
+        Assert.Contains("ended early", failed.Reason, StringComparison.OrdinalIgnoreCase);
+    }
+
+    private sealed class TruncatedContent(byte[] data, int sendBytes) : HttpContent
+    {
+        protected override Task SerializeToStreamAsync(Stream stream, System.Net.TransportContext? context) =>
+            stream.WriteAsync(data, 0, sendBytes);
+        protected override bool TryComputeLength(out long length) { length = data.Length; return true; }
+    }
+
     // ── Helpers ──────────────────────────────────────────────────────────────
 
     private static async Task PlayRoundAsync(TestLevel lvl, TestPlayer picker, params TestPlayer[] players)

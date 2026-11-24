@@ -1,6 +1,7 @@
 using System.Buffers;
 using System.Security.Cryptography;
 using Microsoft.AspNetCore.Http.Features;
+using Microsoft.AspNetCore.Server.Kestrel.Core.Features;
 
 namespace FunkyMakerTransferServer;
 
@@ -29,6 +30,10 @@ public static class TransferEndpoints
         var sizeFeature = ctx.Features.Get<IHttpMaxRequestBodySizeFeature>();
         if (sizeFeature is { IsReadOnly: false })
             sizeFeature.MaxRequestBodySize = ticket.Size;
+
+        var minReqRate = ctx.Features.Get<IHttpMinRequestBodyDataRateFeature>();
+        if (minReqRate != null)
+            minReqRate.MinDataRate = null;
 
         string path = store.NewUploadPath(id);
         // FNF level files have an exact size; packed osu! sets may be anything up to the limit.
@@ -69,12 +74,15 @@ public static class TransferEndpoints
 
                     var fx = new Effects();
                     registry.ReportUploadBytes(id, total, fx);
-                    await runner.RunAsync(fx);
+                    if (fx.HasWork)
+                        await runner.RunAsync(fx);
                 }
             }
 
             if (headerLen < header.Length)
                 throw new InvalidDataException("The file is too small to be a level.");
+            if (ticket.ExactSize && total < ticket.Size)
+                throw new InvalidDataException("The upload ended early (connection closed before finishing).");
 
             string hash = Convert.ToHexStringLower(sha.GetHashAndReset());
             var done = new Effects();
@@ -137,6 +145,10 @@ public static class TransferEndpoints
             return;
         }
 
+        var minRespRate = ctx.Features.Get<IHttpMinResponseDataRateFeature>();
+        if (minRespRate != null)
+            minRespRate.MinDataRate = null;
+
         using var linked = CancellationTokenSource.CreateLinkedTokenSource(ctx.RequestAborted, ticket.Token);
         byte[] buffer = ArrayPool<byte>.Shared.Rent(BufferSize);
         try
@@ -153,9 +165,12 @@ public static class TransferEndpoints
                     total += n;
                     var fx = new Effects();
                     registry.ReportDownloadBytes(id, token, total, fx);
-                    await runner.RunAsync(fx);
+                    if (fx.HasWork)
+                        await runner.RunAsync(fx);
                 }
                 await ctx.Response.Body.FlushAsync(linked.Token);
+                if (total == ticket.Size)
+                    registry.MarkDownloadStreamComplete(id, token);
             }
         }
         catch (OperationCanceledException)

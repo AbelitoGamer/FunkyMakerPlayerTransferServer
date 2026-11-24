@@ -14,6 +14,18 @@ string? port = Environment.GetEnvironmentVariable("PORT");
 if (!string.IsNullOrWhiteSpace(port))
     builder.WebHost.UseUrls($"http://0.0.0.0:{port}");
 
+// Slow / mobile uploads and downloads can pause longer than Kestrel's default 5 s data-rate grace
+// period, and Render's reverse proxy may buffer request/response bodies. Per-transfer size limits
+// and inactivity timeouts are enforced explicitly by TransferEndpoints and RoomRegistry.Sweep.
+builder.WebHost.ConfigureKestrel(k =>
+{
+    k.Limits.MinRequestBodyDataRate = null;
+    k.Limits.MinResponseDataRate = null;
+    k.Limits.MaxRequestBodySize = null;
+    k.Limits.KeepAliveTimeout = TimeSpan.FromMinutes(10);
+    k.Limits.RequestHeadersTimeout = TimeSpan.FromMinutes(2);
+});
+
 builder.Services.Configure<TransferOptions>(builder.Configuration.GetSection("Transfer"));
 builder.Services.Configure<TestingOptions>(builder.Configuration.GetSection("Testing"));
 builder.Services.AddSingleton(TimeProvider.System);
@@ -36,7 +48,9 @@ builder.Services.AddSignalR(o =>
 {
     o.MaximumReceiveMessageSize = 4 * 1024 * 1024; // level lists (with every osu! difficulty) can be ~1-2 MB
     o.KeepAliveInterval = TimeSpan.FromSeconds(10);
-    o.ClientTimeoutInterval = TimeSpan.FromSeconds(30);
+    // Keep generous headroom so uplink saturation (bufferbloat during big uploads) does not drop
+    // the uploader from the room and cancel active transfers; in-match crashes use SilenceTimeout (10 s).
+    o.ClientTimeoutInterval = TimeSpan.FromSeconds(90);
     o.EnableDetailedErrors = builder.Environment.IsDevelopment();
 });
 

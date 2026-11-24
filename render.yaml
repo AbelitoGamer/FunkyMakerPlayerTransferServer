@@ -10,6 +10,10 @@ services:
     envVars:
       - key: Transfer__MaxUploadMegabytes
         value: "250"
+      - key: Transfer__StallTimeoutSeconds
+        value: "300"
+      - key: Transfer__DownloadCompletionGraceSeconds
+        value: "600"
       # Highest player limit hosts can set for a room (2-32)
       - key: Transfer__MaxRoomMembers
         value: "16"

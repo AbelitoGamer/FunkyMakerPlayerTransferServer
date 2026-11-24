@@ -14,7 +14,12 @@ public sealed class TransferOptions
     public int MaxRoomMembers { get; set; } = Protocol.MaxPlayers;
     public int MaxLevelsPerMember { get; set; } = 5000; // osu! sets list every 4K difficulty
     /// <summary>A transfer with no progress for this long is cancelled.</summary>
-    public int StallTimeoutSeconds { get; set; } = 60;
+    public int StallTimeoutSeconds { get; set; } = 300;
+    /// <summary>
+    /// Extra time after Kestrel finishes writing a download response for the client to finish
+    /// draining any reverse-proxy buffer, verifying SHA-256 and reporting CompleteDownload.
+    /// </summary>
+    public int DownloadCompletionGraceSeconds { get; set; } = 600;
     /// <summary>How long an uploaded file stays reusable for the same room after its last use.</summary>
     public int CacheMinutes { get; set; } = 15;
     /// <summary>Minimum gap between progress packets per transfer.</summary>

@@ -57,15 +57,15 @@ return; the client buffers them.
 
 | | |
 |---|---|
-| Loading | 60 s; players who haven't loaded become spectators (round cancelled if fewer than 2 remain). |
+| Loading | 150 s; players who haven't loaded become spectators (round cancelled if fewer than 2 remain). |
 | Finishing | 30 s after the first player finishes; missing players are ranked with their last live state. |
 | Silence | A match player who sends no state / hit / key press for 10 s after the song start is out of the match ("stopped responding"); the round ends as soon as everybody left is done. |
-| Connection | SignalR client timeout 30 s (keep-alive 10 s). |
+| Connection | SignalR client timeout 90 s (keep-alive 10 s). |
+| Transfers | `StallTimeoutSeconds` (300 s) without progress; after Kestrel finishes streaming a download to the proxy, `DownloadCompletionGraceSeconds` (600 s) for the client to finish draining/verifying (`CompleteDownload`). A failed upload tries the next holder. |
 
 Picks are final: `SelectSong` fails while a song is picked (the server clears a pick when the picker
 leaves or spectates, or new settings disallow it). `FinishMatch` with `Quit` also works while loading.
 `RoomMember.UploadProgress` (0-1, -1 = none) is the member's upload of the round's level.
-| Transfers | `StallTimeoutSeconds` (60) without progress; a failed upload tries the next holder. |
 
 ## HTTP
 
@@ -97,7 +97,8 @@ Environment tab; saving redeploys the service.
 |---|---|---|
 | `MaxUploadMegabytes` | 250 | Levels larger than this are not listed or accepted (osu! sets: listed while the set without video fits). |
 | `MaxLevelsPerMember` | 5000 | Every osu! difficulty is an entry. |
-| `StallTimeoutSeconds` | 60 | |
+| `StallTimeoutSeconds` | 300 | Inactivity timeout for uploads and in-progress download streams. |
+| `DownloadCompletionGraceSeconds` | 600 | Extra grace after Kestrel finishes writing a download response to a reverse proxy before `CompleteDownload` is required. |
 | `CacheMinutes` | 15 | Uploaded levels stay reusable in the room this long. |
 | `ProgressIntervalMs` | 200 | Room state throttle while downloading. |
 | `HttpRequestsPerMinute` | 60 | Per IP, on `/api/transfers` and `/api/replays`. |
