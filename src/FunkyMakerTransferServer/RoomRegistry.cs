@@ -30,6 +30,7 @@ public sealed class Effects
 /// osu! sets it is only the most the upload may be (the uploader makes the .osz on request).
 /// </summary>
 public sealed record UploadTicket(string TransferId, string Hash, long Size, bool ExactSize, CancellationToken Token);
+public sealed record ChunkUploadTicket(string TransferId, string FilePath, long MaxSize, long CurrentLength, bool ExactSize, CancellationToken Token);
 public sealed record DownloadTicket(string TransferId, string FilePath, long Size, string FileName, CancellationToken Token);
 public sealed record RegistryStats(int Sessions, int Rooms, int Members, int Matches, int Transfers, int CachedFiles);
 
@@ -116,15 +117,41 @@ public sealed partial class RoomRegistry
                 s = new Session(connectionId);
                 _sessions[connectionId] = s;
             }
+            bool variantPrefChanged = s.OsuSkipVideo != request.OsuSkipVideo || s.FnfChartOnly != request.FnfChartOnly;
             s.PlayerId = playerId;
             s.Username = CleanName(request.Username, "Player");
             s.ColorHue = Math.Clamp(request.ColorHue, 0, 360);
             s.OsuSkipVideo = request.OsuSkipVideo;
+            s.FnfChartOnly = request.FnfChartOnly;
             s.Greeted = true;
-            // Profile changes show up in the room right away.
-            if (s.Member != null) BroadcastRoomLocked(s.Member.Room, fx);
+            // Profile / variant preference changes show up in the room right away.
+            if (s.Member != null)
+            {
+                if (variantPrefChanged)
+                {
+                    // Cancel any active download for the previous variant before switching.
+                    foreach (var tr in _transfers.Values.Where(x => x.Room == s.Member.Room))
+                    {
+                        if (tr.Downloads.Remove(s.PlayerId, out var activeDl))
+                            fx.ToCancel.Add(activeDl.Cts);
+                    }
+                    UpdateMemberLevelStateLocked(s.Member);
+                    if (s.Member.LevelState == Protocol.LevelMissing)
+                        OfferDownloadLocked(s.Member.Room, s.Member, fx);
+                    TryAdvanceRoundLocked(s.Member.Room, fx);
+                }
+                BroadcastRoomLocked(s.Member.Room, fx);
+            }
         }
-        return new HelloResult { Ok = true, MaxUploadBytes = _options.MaxUploadBytes, MaxRoomPlayers = MaxRoomPlayers };
+        return new HelloResult
+        {
+            Ok = true,
+            MaxUploadBytes = _options.MaxUploadBytes,
+            MaxRoomPlayers = MaxRoomPlayers,
+            SupportsChunkedUpload = true,
+            SupportsFnfChartOnly = true,
+            UploadChunkBytes = _options.UploadChunkBytes,
+        };
     }
 
     /// <summary>Updates the connection's average ping (used for the start buffer) and returns the reply.</summary>
@@ -523,10 +550,18 @@ public sealed partial class RoomRegistry
                 _ => Protocol.LevelMissing,
             };
             // The server knows best for local levels it is sending itself.
-            if (state == Protocol.LevelReady && song.Source == Protocol.SourceLocal && !m.Levels.ContainsKey(song.Hash))
-                m.Room.LevelsVersion++;
             if (state == Protocol.LevelReady && song.Source == Protocol.SourceLocal)
-                m.Levels.TryAdd(song.Hash, EntryFor(song));
+            {
+                if (song.Kind == Protocol.KindFnf && m.Session.FnfChartOnly && !m.Levels.ContainsKey(song.Hash))
+                {
+                    m.ChartOnlyHashes.Add(song.Hash);
+                }
+                else
+                {
+                    if (!m.Levels.ContainsKey(song.Hash)) m.Room.LevelsVersion++;
+                    m.Levels.TryAdd(song.Hash, EntryFor(song));
+                }
+            }
 
             bool changed = m.LevelState != state;
             m.LevelState = state;
@@ -681,9 +716,111 @@ public sealed partial class RoomRegistry
             t.UploadStarted = true;
             t.LastActivity = Now;
             error = "";
-            return t.Kind == Protocol.KindOsu
+            return t.IsPackedVariant
                 ? new UploadTicket(t.Id, t.Hash, _options.MaxUploadBytes, ExactSize: false, t.Cts.Token)
                 : new UploadTicket(t.Id, t.Hash, t.Size, ExactSize: true, t.Cts.Token);
+        }
+    }
+
+    public ChunkUploadTicket? BeginChunkUpload(string transferId, string token, long offset, long chunkLength, TransferStore store, out string error)
+    {
+        lock (_lock)
+        {
+            if (!_transfers.TryGetValue(transferId, out var t) || !SecretEquals(t.UploadToken, token))
+            {
+                error = "Unknown transfer.";
+                return null;
+            }
+            if (t.FilePath != null || (t.UploadStarted && t.ChunkFilePath == null))
+            {
+                error = "This transfer is not accepting chunked uploads.";
+                return null;
+            }
+            if (t.ChunkWriteInFlight)
+            {
+                error = "Another chunk upload is already in progress.";
+                return null;
+            }
+            long maxSize = t.IsPackedVariant ? _options.MaxUploadBytes : t.Size;
+            if (offset < 0 || offset > t.ChunkBytesWritten)
+            {
+                error = $"Invalid chunk offset {offset} (expected <= {t.ChunkBytesWritten}).";
+                return null;
+            }
+            if (chunkLength < 0 || offset + chunkLength > maxSize)
+            {
+                error = "Chunk exceeds the allowed level size.";
+                return null;
+            }
+
+            t.ChunkFilePath ??= store.NewUploadPath(transferId);
+            t.UploadStarted = true;
+            t.ChunkWriteInFlight = true;
+            t.LastActivity = Now;
+            error = "";
+            return new ChunkUploadTicket(t.Id, t.ChunkFilePath, maxSize, t.ChunkBytesWritten, ExactSize: !t.IsPackedVariant, t.Cts.Token);
+        }
+    }
+
+    public void FinishChunkUpload(string transferId, long newEndOffset, Effects fx)
+    {
+        lock (_lock)
+        {
+            if (!_transfers.TryGetValue(transferId, out var t) || t.FilePath != null) return;
+            t.ChunkWriteInFlight = false;
+            if (newEndOffset > t.ChunkBytesWritten)
+                t.ChunkBytesWritten = newEndOffset;
+            t.UploadBytes = t.ChunkBytesWritten;
+            t.LastActivity = Now;
+            var uploader = t.Room.Members.FirstOrDefault(x => x.Session.PlayerId == t.UploaderId);
+            long expected = t.Size > 0 ? t.Size : t.EstimatedSize;
+            if (uploader != null) uploader.UploadProgress = expected > 0 ? Math.Min(1f, (float)t.UploadBytes / expected) : 0f;
+            if (ProgressBroadcastDue(t.Room)) BroadcastRoomLocked(t.Room, fx);
+        }
+    }
+
+    public void AbortChunkWrite(string transferId)
+    {
+        lock (_lock)
+        {
+            if (_transfers.TryGetValue(transferId, out var t))
+            {
+                t.ChunkWriteInFlight = false;
+                t.LastActivity = Now;
+            }
+        }
+    }
+
+    public ChunkUploadTicket? BeginCompleteChunkedUpload(string transferId, string token, out string error)
+    {
+        lock (_lock)
+        {
+            if (!_transfers.TryGetValue(transferId, out var t) || !SecretEquals(t.UploadToken, token))
+            {
+                error = "Unknown transfer.";
+                return null;
+            }
+            if (t.FilePath != null || t.ChunkFilePath == null)
+            {
+                error = "No chunked upload is waiting to complete.";
+                return null;
+            }
+            if (t.ChunkWriteInFlight)
+            {
+                error = "A chunk upload is still in progress.";
+                return null;
+            }
+            if (t.ChunkBytesWritten < 4)
+            {
+                error = "The file is too small to be a level.";
+                return null;
+            }
+
+            long maxSize = t.IsPackedVariant ? _options.MaxUploadBytes : t.Size;
+            t.ChunkWriteInFlight = true;
+            t.LastActivity = Now;
+            error = "";
+            return new ChunkUploadTicket(t.Id, t.ChunkFilePath, maxSize, t.ChunkBytesWritten, ExactSize: !t.IsPackedVariant, t.Cts.Token);
         }
     }
 
@@ -713,10 +850,10 @@ public sealed partial class RoomRegistry
                 error = "The transfer was cancelled.";
                 return false;
             }
-            if (t.Kind == Protocol.KindOsu)
+            if (t.IsPackedVariant)
             {
-                // A packed set: any size up to the limit; downloaders check this hash, then find
-                // the difficulty's .osu in it.
+                // A packed variant (osu! .osz or FNF chartonly .fnmm): any size up to the limit;
+                // downloaders check FileHash rather than the original full-level hash.
                 t.Size = actualSize;
                 t.FileHash = actualHash.ToLowerInvariant();
             }
@@ -728,6 +865,8 @@ public sealed partial class RoomRegistry
                 return false;
             }
 
+            t.ChunkWriteInFlight = false;
+            t.ChunkFilePath = null;
             t.FilePath = path;
             t.LastActivity = Now;
             if (t.Room.Cache.TryGetValue(t.CacheKey, out var existing))
@@ -735,7 +874,11 @@ public sealed partial class RoomRegistry
                 fx.FilesToDelete.Add(existing.Path);
             }
             t.Room.Cache[t.CacheKey] = new CachedFile(path, t.Size, t.FileHash) { ExpiresAt = Now.AddMinutes(_options.CacheMinutes) };
-            foreach (var u in t.Room.Members) u.UploadProgress = -1f;
+            foreach (var u in t.Room.Members)
+            {
+                if (!_transfers.Values.Any(x => x.Room == t.Room && x.FilePath == null && x.UploaderId == u.Session.PlayerId))
+                    u.UploadProgress = -1f;
+            }
             foreach (var m in t.Room.Members) OfferDownloadLocked(t.Room, m, fx);
             BroadcastRoomLocked(t.Room, fx);
             error = "";
@@ -829,14 +972,24 @@ public sealed partial class RoomRegistry
             if (!hadPending && !ok) return;
             if (ok)
             {
-                m.Levels[t.Hash] = new LevelEntry
+                if (t.Variant == Protocol.VariantChartOnly)
                 {
-                    Hash = t.Hash, Name = t.Entry.Name, FileName = t.Entry.FileName, Size = t.Entry.Size, Stars = t.Entry.Stars,
-                    Kind = t.Entry.Kind, SetId = t.Entry.SetId, SetName = t.Entry.SetName, Difficulty = t.Entry.Difficulty,
-                    SizeNoVideo = t.Entry.SizeNoVideo,
-                };
-                m.Room.LevelsVersion++;
-                UpdateMemberLevelStateLocked(m);
+                    // Chart-only download satisfies this member while ChartOnly is enabled,
+                    // without registering them as a full-sprites holder for other players.
+                    m.ChartOnlyHashes.Add(t.Hash);
+                    UpdateMemberLevelStateLocked(m);
+                }
+                else
+                {
+                    m.Levels[t.Hash] = new LevelEntry
+                    {
+                        Hash = t.Hash, Name = t.Entry.Name, FileName = t.Entry.FileName, Size = t.Entry.Size, Stars = t.Entry.Stars,
+                        Kind = t.Entry.Kind, SetId = t.Entry.SetId, SetName = t.Entry.SetName, Difficulty = t.Entry.Difficulty,
+                        SizeNoVideo = t.Entry.SizeNoVideo,
+                    };
+                    m.Room.LevelsVersion++;
+                    UpdateMemberLevelStateLocked(m);
+                }
             }
             else
             {
@@ -1063,6 +1216,10 @@ public sealed partial class RoomRegistry
         BroadcastRoomLocked(room, fx);
     }
 
+    private static bool HasSongForCurrentModeLocked(Member m, SongInfo song) =>
+        m.Levels.ContainsKey(song.Hash) ||
+        (song.Kind == Protocol.KindFnf && m.Session.FnfChartOnly && m.ChartOnlyHashes.Contains(song.Hash));
+
     private void UpdateMemberLevelStateLocked(Member m)
     {
         var song = m.Room.Song ?? m.Room.Match?.Info.Song;
@@ -1072,14 +1229,14 @@ public sealed partial class RoomRegistry
             m.LevelProgress = 0f;
             return;
         }
-        if (m.Levels.ContainsKey(song.Hash))
+        if (HasSongForCurrentModeLocked(m, song))
         {
             m.LevelState = Protocol.LevelReady;
             m.LevelProgress = 1f;
         }
         else if (m.LevelState == Protocol.LevelReady && song.Source == Protocol.SourceLocal)
         {
-            // Their level list no longer has it.
+            // Their level list no longer has it (or they switched from Chart Only to full sprites).
             m.LevelState = Protocol.LevelMissing;
             m.LevelProgress = 0f;
             m.Ready = false;
@@ -1115,11 +1272,13 @@ public sealed partial class RoomRegistry
         Kind = song.Kind, SetId = song.SetId, SetName = song.SetName, Difficulty = song.Difficulty, SizeNoVideo = song.SizeNoVideo,
     };
 
-    /// <summary>The osu! set variant a player gets: without video when they asked for it and there is one.</summary>
+    /// <summary>Transfer variant a player gets: osu! novideo when skipping video; FNF chartonly when Chart-Only mode is enabled.</summary>
     private static string VariantFor(Member m, SongInfo song) =>
-        song.Kind == Protocol.KindOsu && m.Session.OsuSkipVideo && song.SizeNoVideo > 0 && song.SizeNoVideo < song.Size
-            ? Protocol.VariantNoVideo
-            : Protocol.VariantFull;
+        song.Kind == Protocol.KindOsu
+            ? (m.Session.OsuSkipVideo && song.SizeNoVideo > 0 && song.SizeNoVideo < song.Size
+                ? Protocol.VariantNoVideo
+                : Protocol.VariantFull)
+            : (m.Session.FnfChartOnly ? Protocol.VariantChartOnly : Protocol.VariantFull);
 
     // ══════════════════════════════════════════════════════════════════════
     // Internals: turns
@@ -1475,7 +1634,7 @@ public sealed partial class RoomRegistry
     {
         var song = room.Song ?? room.Match?.Info.Song;
         if (song == null || song.Source != Protocol.SourceLocal) return;
-        var needers = room.Members.Where(m => !m.Levels.ContainsKey(song.Hash)).ToList();
+        var needers = room.Members.Where(m => !HasSongForCurrentModeLocked(m, song)).ToList();
         if (needers.Count == 0) return;
 
         var variants = variant != null ? new List<string> { variant } : needers.Select(m => VariantFor(m, song)).Distinct().ToList();
@@ -1499,14 +1658,14 @@ public sealed partial class RoomRegistry
             return;
         }
 
-        // Uploader: the picker, then the host, then anybody who has it.
+        // Uploader: the picker, then the host, then anybody who has the full level locally.
         var holders = room.Members.Where(m => m.Levels.ContainsKey(song.Hash) && m.Session.PlayerId != excludeUploader).ToList();
         var uploader = holders.FirstOrDefault(m => m.Session.PlayerId == song.PickedBy)
                        ?? holders.FirstOrDefault(m => m == room.Host)
                        ?? holders.FirstOrDefault();
         if (uploader == null)
         {
-            foreach (var m in room.Members.Where(m => !m.Levels.ContainsKey(song.Hash) && VariantFor(m, song) == variant))
+            foreach (var m in room.Members.Where(m => !HasSongForCurrentModeLocked(m, song) && VariantFor(m, song) == variant))
             {
                 m.LevelState = Protocol.LevelFailed;
                 fx.Send(m.Session.ConnectionId, Protocol.TransferFailed, new TransferFailedPacket
@@ -1529,6 +1688,7 @@ public sealed partial class RoomRegistry
     private Transfer NewTransfer(Room room, SongInfo song, string variant, string uploaderId)
     {
         bool osu = song.Kind == Protocol.KindOsu;
+        bool packedVariant = osu || variant == Protocol.VariantChartOnly;
         // The holders' own entry (sizes / stars as they announced them), else the song's.
         var entry = room.Members.Select(m => m.Levels.GetValueOrDefault(song.Hash)).FirstOrDefault(e => e != null) ?? EntryFor(song);
         var t = new Transfer(NewId(16), room, song.Hash, uploaderId, NewId(24))
@@ -1536,9 +1696,11 @@ public sealed partial class RoomRegistry
             Entry = entry,
             Kind = osu ? Protocol.KindOsu : Protocol.KindFnf,
             Variant = variant,
-            Size = osu ? 0 : song.Size,
-            EstimatedSize = variant == Protocol.VariantNoVideo && song.SizeNoVideo > 0 ? song.SizeNoVideo : song.Size,
-            FileHash = osu ? "" : song.Hash,
+            Size = packedVariant ? 0 : song.Size,
+            EstimatedSize = variant == Protocol.VariantNoVideo && song.SizeNoVideo > 0 ? song.SizeNoVideo
+                : variant == Protocol.VariantChartOnly ? Math.Max(1L, Math.Min(song.Size, 12L * 1024 * 1024))
+                : song.Size,
+            FileHash = packedVariant ? "" : song.Hash,
             LastActivity = Now,
         };
         _transfers[t.Id] = t;
@@ -1546,13 +1708,13 @@ public sealed partial class RoomRegistry
     }
 
     private static string CacheKeyOf(string hash, string kind, string variant) =>
-        kind == Protocol.KindOsu ? $"{hash}:{variant}" : hash;
+        variant == Protocol.VariantFull ? hash : $"{hash}:{variant}";
 
     /// <summary>Gives <paramref name="m"/> a download ticket for the room's current level if they lack it and it's on the server.</summary>
     private void OfferDownloadLocked(Room room, Member m, Effects fx)
     {
         var song = room.Song ?? room.Match?.Info.Song;
-        if (song == null || song.Source != Protocol.SourceLocal || m.Levels.ContainsKey(song.Hash)) return;
+        if (song == null || song.Source != Protocol.SourceLocal || HasSongForCurrentModeLocked(m, song)) return;
 
         string variant = VariantFor(m, song);
         var t = _transfers.Values.FirstOrDefault(x => x.Room == room && x.Hash == song.Hash && x.Variant == variant);
@@ -1582,7 +1744,11 @@ public sealed partial class RoomRegistry
         string failedUploader = t.UploaderId;
         EndTransferLocked(t, fx);
         var room = t.Room;
-        foreach (var m in room.Members) m.UploadProgress = -1f;
+        foreach (var m in room.Members)
+        {
+            if (!_transfers.Values.Any(x => x.Room == room && x.FilePath == null && x.UploaderId == m.Session.PlayerId))
+                m.UploadProgress = -1f;
+        }
         if (!_rooms.ContainsKey(room.Id)) return;
 
         var song = room.Song ?? room.Match?.Info.Song;
@@ -1593,7 +1759,7 @@ public sealed partial class RoomRegistry
         }
         else
         {
-            foreach (var m in room.Members.Where(m => !m.Levels.ContainsKey(t.Hash) && (song == null || VariantFor(m, song) == t.Variant)))
+            foreach (var m in room.Members.Where(m => (song == null ? !m.Levels.ContainsKey(t.Hash) : !HasSongForCurrentModeLocked(m, song)) && (song == null || VariantFor(m, song) == t.Variant)))
             {
                 m.LevelState = Protocol.LevelFailed;
                 fx.Send(m.Session.ConnectionId, Protocol.TransferFailed, new TransferFailedPacket { Hash = t.Hash, Reason = reason });
@@ -1606,6 +1772,11 @@ public sealed partial class RoomRegistry
     private void EndTransferLocked(Transfer t, Effects fx)
     {
         _transfers.Remove(t.Id);
+        if (t.ChunkFilePath != null && t.FilePath == null)
+        {
+            fx.FilesToDelete.Add(t.ChunkFilePath);
+            t.ChunkFilePath = null;
+        }
         fx.ToCancel.Add(t.Cts);
         foreach (var d in t.Downloads.Values) fx.ToCancel.Add(d.Cts);
         t.Downloads.Clear();
@@ -1874,6 +2045,8 @@ public sealed partial class RoomRegistry
         public int ColorHue { get; set; } = 180;
         /// <summary>Wants osu! sets without their video (<see cref="HelloRequest.OsuSkipVideo"/>).</summary>
         public bool OsuSkipVideo { get; set; }
+        /// <summary>Wants FNF levels stripped to chart + music only (<see cref="HelloRequest.FnfChartOnly"/>).</summary>
+        public bool FnfChartOnly { get; set; }
         public bool Greeted { get; set; }
         public double AvgPing { get; set; }
         public Member? Member { get; set; }
@@ -1912,6 +2085,8 @@ public sealed partial class RoomRegistry
         public Room Room { get; } = room;
         public long JoinSeq { get; } = joinSeq;
         public Dictionary<string, LevelEntry> Levels { get; set; } = new();
+        /// <summary>FNF hashes this member received as chart-only (not full holders for other players).</summary>
+        public HashSet<string> ChartOnlyHashes { get; } = new(StringComparer.Ordinal);
         public bool Ready { get; set; }
         public bool Spectate { get; set; }
         public int Vote { get; set; } = -1;
@@ -1966,11 +2141,13 @@ public sealed partial class RoomRegistry
         public string Kind { get; init; } = Protocol.KindFnf;
         /// <summary>osu!: full / novideo (fnf: always full).</summary>
         public string Variant { get; init; } = Protocol.VariantFull;
-        /// <summary>Bytes of the file on the server (osu!: 0 until the packed set is uploaded).</summary>
+        /// <summary>True when the uploader repacks the file (osu! .osz or FNF chartonly .fnmm), so exact size/hash are known after upload.</summary>
+        public bool IsPackedVariant => Kind == Protocol.KindOsu || Variant == Protocol.VariantChartOnly;
+        /// <summary>Bytes of the file on the server (packed variants: 0 until uploaded).</summary>
         public long Size { get; set; }
         /// <summary>Expected size for upload progress (osu!: the announced set size).</summary>
         public long EstimatedSize { get; init; }
-        /// <summary>SHA-256 of the file downloaders get (osu!: known once uploaded).</summary>
+        /// <summary>SHA-256 of the file downloaders get (packed variants: known once uploaded).</summary>
         public string FileHash { get; set; } = "";
         public string CacheKey => CacheKeyOf(Hash, Kind, Variant);
         public string UploaderId { get; } = uploaderId;
@@ -1978,6 +2155,9 @@ public sealed partial class RoomRegistry
         public CancellationTokenSource Cts { get; } = new();
         public bool UploadStarted { get; set; }
         public long UploadBytes { get; set; }
+        public string? ChunkFilePath { get; set; }
+        public long ChunkBytesWritten { get; set; }
+        public bool ChunkWriteInFlight { get; set; }
         public DateTimeOffset LastActivity { get; set; }
         /// <summary>Set once the file is on the server (uploaded or from the room cache).</summary>
         public string? FilePath { get; set; }

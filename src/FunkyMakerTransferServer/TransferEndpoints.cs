@@ -119,6 +119,205 @@ public static class TransferEndpoints
         }
     }
 
+    /// <summary>
+    /// Chunked upload endpoint (<c>PUT /api/transfers/{id}/chunks?offset=N</c>): each chunk is a small
+    /// HTTP request (e.g. 4 MB) so slow connections never hit reverse-proxy request timeouts (Cloudflare/Render
+    /// ~100 s limit) and failed chunks can be retried idempotently at the same offset.
+    /// </summary>
+    public static async Task<IResult> UploadChunkAsync(string id, HttpContext ctx, RoomRegistry registry,
+        TransferStore store, EffectRunner runner, ILoggerFactory loggers)
+    {
+        var log = loggers.CreateLogger("UploadChunk");
+        string token = ctx.Request.Headers[Protocol.TokenHeader].ToString();
+        if (!long.TryParse(ctx.Request.Query["offset"], out long offset) || offset < 0)
+            return Results.Problem("Missing or invalid offset query parameter.", statusCode: 400);
+
+        long announcedLen = ctx.Request.ContentLength ?? 0;
+        const long MaxSingleChunkBytes = 20L * 1024 * 1024;
+        if (announcedLen > MaxSingleChunkBytes)
+            return Results.Problem("Chunk is too large.", statusCode: 413);
+
+        var ticket = registry.BeginChunkUpload(id, token, offset, announcedLen, store, out string error);
+        if (ticket == null)
+            return Results.Problem(error, statusCode: StatusCodes.Status409Conflict);
+
+        var sizeFeature = ctx.Features.Get<IHttpMaxRequestBodySizeFeature>();
+        if (sizeFeature is { IsReadOnly: false })
+            sizeFeature.MaxRequestBodySize = MaxSingleChunkBytes;
+
+        var minReqRate = ctx.Features.Get<IHttpMinRequestBodyDataRateFeature>();
+        if (minReqRate != null)
+            minReqRate.MinDataRate = null;
+
+        using var linked = CancellationTokenSource.CreateLinkedTokenSource(ctx.RequestAborted, ticket.Token);
+        byte[] buffer = ArrayPool<byte>.Shared.Rent(BufferSize);
+        bool finished = false;
+        try
+        {
+            long written = 0;
+            var header = new byte[4];
+            int headerLen = 0;
+            await using (var file = new FileStream(ticket.FilePath, FileMode.OpenOrCreate, FileAccess.Write, FileShare.None, BufferSize, useAsync: true))
+            {
+                file.Seek(offset, SeekOrigin.Begin);
+                int n;
+                while ((n = await ctx.Request.Body.ReadAsync(buffer.AsMemory(0, BufferSize), linked.Token)) > 0)
+                {
+                    if (offset == 0 && headerLen < header.Length)
+                    {
+                        int take = Math.Min(n, header.Length - headerLen);
+                        Array.Copy(buffer, 0, header, headerLen, take);
+                        headerLen += take;
+                        if (headerLen == header.Length && !LevelFile.HasKnownSignature(header))
+                            throw new InvalidDataException("The file is not a level archive (.fnmm/.zip/.rar/.osz).");
+                    }
+
+                    written += n;
+                    if (written > MaxSingleChunkBytes || offset + written > ticket.MaxSize)
+                        throw new InvalidDataException("The upload is larger than the level.");
+
+                    await file.WriteAsync(buffer.AsMemory(0, n), linked.Token);
+                }
+            }
+
+            if (offset == 0 && headerLen < header.Length && ticket.CurrentLength < 4)
+                throw new InvalidDataException("The file is too small to be a level.");
+
+            if (ctx.Request.ContentLength is long expected && written != expected)
+            {
+                // Transient proxy truncation on this chunk: release lock without failing the whole transfer so client can retry this offset.
+                registry.AbortChunkWrite(id);
+                finished = true;
+                return Results.Problem("Chunk body ended early; retry this offset.", statusCode: 400);
+            }
+
+            var fx = new Effects();
+            registry.FinishChunkUpload(id, offset + written, fx);
+            finished = true;
+            if (fx.HasWork)
+                await runner.RunAsync(fx);
+
+            return Results.Ok(new { written = offset + written });
+        }
+        catch (InvalidDataException ex)
+        {
+            var fx = new Effects();
+            registry.FailUpload(id, ex.Message, ticket.FilePath, fx);
+            finished = true;
+            await runner.RunAsync(fx);
+            return Results.Problem(ex.Message, statusCode: 400);
+        }
+        catch (OperationCanceledException)
+        {
+            // Keep transfer alive for client retry unless the transfer itself was cancelled.
+            if (!ticket.Token.IsCancellationRequested)
+                registry.AbortChunkWrite(id);
+            finished = true;
+            return Results.StatusCode(499);
+        }
+        catch (Exception ex)
+        {
+            log.LogWarning(ex, "Chunk upload {Id} at offset {Offset} failed", id, offset);
+            registry.AbortChunkWrite(id);
+            finished = true;
+            return Results.Problem("Chunk upload failed; retry this offset.", statusCode: 500);
+        }
+        finally
+        {
+            if (!finished)
+                registry.AbortChunkWrite(id);
+            ArrayPool<byte>.Shared.Return(buffer);
+        }
+    }
+
+    /// <summary>
+    /// Finalizes a chunked upload (<c>POST /api/transfers/{id}/complete</c>): streams the assembled file
+    /// on disk to compute SHA-256 and exact size, validates against the transfer ticket, and triggers downloads.
+    /// </summary>
+    public static async Task<IResult> CompleteChunkedUploadAsync(string id, HttpContext ctx, RoomRegistry registry,
+        EffectRunner runner, ILoggerFactory loggers)
+    {
+        var log = loggers.CreateLogger("CompleteChunkedUpload");
+        string token = ctx.Request.Headers[Protocol.TokenHeader].ToString();
+        var ticket = registry.BeginCompleteChunkedUpload(id, token, out string error);
+        if (ticket == null)
+            return Results.Problem(error, statusCode: StatusCodes.Status409Conflict);
+
+        using var linked = CancellationTokenSource.CreateLinkedTokenSource(ctx.RequestAborted, ticket.Token);
+        byte[] buffer = ArrayPool<byte>.Shared.Rent(BufferSize);
+        bool completedOrFailed = false;
+        try
+        {
+            long total = 0;
+            var header = new byte[4];
+            int headerLen = 0;
+            using var sha = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+            await using (var file = new FileStream(ticket.FilePath, FileMode.Open, FileAccess.Read, FileShare.Read, BufferSize, useAsync: true))
+            {
+                if (file.Length > ticket.CurrentLength)
+                    total = 0; // hash only up to recorded CurrentLength below
+                long remaining = Math.Min(file.Length, ticket.CurrentLength);
+                while (remaining > 0)
+                {
+                    int toRead = (int)Math.Min(BufferSize, remaining);
+                    int n = await file.ReadAsync(buffer.AsMemory(0, toRead), linked.Token);
+                    if (n <= 0) break;
+                    if (headerLen < header.Length)
+                    {
+                        int take = Math.Min(n, header.Length - headerLen);
+                        Array.Copy(buffer, 0, header, headerLen, take);
+                        headerLen += take;
+                    }
+                    sha.AppendData(buffer, 0, n);
+                    total += n;
+                    remaining -= n;
+                }
+            }
+
+            if (headerLen < header.Length || !LevelFile.HasKnownSignature(header))
+                throw new InvalidDataException("The file is not a level archive (.fnmm/.zip/.rar/.osz).");
+            if (ticket.ExactSize && total < ticket.MaxSize)
+                throw new InvalidDataException("The upload ended early (connection closed before finishing).");
+            if (total > ticket.MaxSize)
+                throw new InvalidDataException("The upload is larger than the level.");
+
+            string hash = Convert.ToHexStringLower(sha.GetHashAndReset());
+            var done = new Effects();
+            bool ok = registry.CompleteUpload(id, ticket.FilePath, hash, total, done, out string completeError);
+            completedOrFailed = true;
+            await runner.RunAsync(done);
+            return ok ? Results.Ok() : Results.Problem(completeError, statusCode: 400);
+        }
+        catch (InvalidDataException ex)
+        {
+            var fx = new Effects();
+            registry.FailUpload(id, ex.Message, ticket.FilePath, fx);
+            completedOrFailed = true;
+            await runner.RunAsync(fx);
+            return Results.Problem(ex.Message, statusCode: 400);
+        }
+        catch (OperationCanceledException)
+        {
+            if (!ticket.Token.IsCancellationRequested)
+                registry.AbortChunkWrite(id);
+            completedOrFailed = true;
+            return Results.StatusCode(499);
+        }
+        catch (Exception ex)
+        {
+            log.LogWarning(ex, "Completing chunked upload {Id} failed", id);
+            registry.AbortChunkWrite(id);
+            completedOrFailed = true;
+            return Results.Problem("Failed to finalize upload.", statusCode: 500);
+        }
+        finally
+        {
+            if (!completedOrFailed)
+                registry.AbortChunkWrite(id);
+            ArrayPool<byte>.Shared.Return(buffer);
+        }
+    }
+
     public static async Task DownloadAsync(string id, HttpContext ctx, RoomRegistry registry,
         EffectRunner runner, ILoggerFactory loggers)
     {

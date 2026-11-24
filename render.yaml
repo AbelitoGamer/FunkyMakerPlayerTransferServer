@@ -16,6 +16,10 @@ services:
         value: "600"
       - key: Transfer__LoadingTimeoutSeconds
         value: "180"
+      - key: Transfer__HttpRequestsPerMinute
+        value: "360"
+      - key: Transfer__UploadChunkMegabytes
+        value: "4"
       # Highest player limit hosts can set for a room (2-32)
       - key: Transfer__MaxRoomMembers
         value: "16"
