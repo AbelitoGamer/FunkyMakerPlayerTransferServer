@@ -14,6 +14,8 @@ services:
         value: "300"
       - key: Transfer__DownloadCompletionGraceSeconds
         value: "600"
+      - key: Transfer__LoadingTimeoutSeconds
+        value: "180"
       # Highest player limit hosts can set for a room (2-32)
       - key: Transfer__MaxRoomMembers
         value: "16"

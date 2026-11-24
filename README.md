@@ -57,7 +57,7 @@ return; the client buffers them.
 
 | | |
 |---|---|
-| Loading | 150 s; players who haven't loaded become spectators (round cancelled if fewer than 2 remain). |
+| Loading | `LoadingTimeoutSeconds` (180 s); players who haven't loaded become spectators (round cancelled if fewer than 2 remain). |
 | Finishing | 30 s after the first player finishes; missing players are ranked with their last live state. |
 | Silence | A match player who sends no state / hit / key press for 10 s after the song start is out of the match ("stopped responding"); the round ends as soon as everybody left is done. |
 | Connection | SignalR client timeout 90 s (keep-alive 10 s). |
@@ -99,6 +99,7 @@ Environment tab; saving redeploys the service.
 | `MaxLevelsPerMember` | 5000 | Every osu! difficulty is an entry. |
 | `StallTimeoutSeconds` | 300 | Inactivity timeout for uploads and in-progress download streams. |
 | `DownloadCompletionGraceSeconds` | 600 | Extra grace after Kestrel finishes writing a download response to a reverse proxy before `CompleteDownload` is required. |
+| `LoadingTimeoutSeconds` | 180 | Max time a match waits in `loading` before slow loaders become spectators. |
 | `CacheMinutes` | 15 | Uploaded levels stay reusable in the room this long. |
 | `ProgressIntervalMs` | 200 | Room state throttle while downloading. |
 | `HttpRequestsPerMinute` | 60 | Per IP, on `/api/transfers` and `/api/replays`. |

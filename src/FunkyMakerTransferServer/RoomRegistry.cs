@@ -54,7 +54,7 @@ public sealed record OfficialLevel(string Id, string Name, string FileName, stri
 /// </summary>
 public sealed partial class RoomRegistry
 {
-    public static readonly TimeSpan LoadingTimeout = TimeSpan.FromSeconds(150);
+    public static readonly TimeSpan LoadingTimeout = TimeSpan.FromSeconds(180);
     public static readonly TimeSpan FinishGrace = TimeSpan.FromSeconds(30);
     public static readonly TimeSpan KickBan = TimeSpan.FromMinutes(5);
     /// <summary>A match player who sends nothing for this long (after the song start) has left it.</summary>
@@ -885,10 +885,14 @@ public sealed partial class RoomRegistry
                 }
             }
 
+            var loadingTimeout = _options.LoadingTimeoutSeconds > 0
+                ? TimeSpan.FromSeconds(_options.LoadingTimeoutSeconds)
+                : LoadingTimeout;
+
             foreach (var room in _rooms.Values.ToList())
             {
                 var match = room.Match;
-                if (match != null && room.Phase == Protocol.PhaseLoading && now - match.CreatedAt > LoadingTimeout)
+                if (match != null && room.Phase == Protocol.PhaseLoading && now - match.CreatedAt > loadingTimeout)
                 {
                     var slow = match.Participants.Keys.Where(id => !match.Loaded.Contains(id)).ToList();
                     foreach (var id in slow) match.Participants.Remove(id);

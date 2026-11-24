@@ -20,6 +20,8 @@ public sealed class TransferOptions
     /// draining any reverse-proxy buffer, verifying SHA-256 and reporting CompleteDownload.
     /// </summary>
     public int DownloadCompletionGraceSeconds { get; set; } = 600;
+    /// <summary>Max time a match waits in PhaseLoading before slow loaders become spectators.</summary>
+    public int LoadingTimeoutSeconds { get; set; } = 180;
     /// <summary>How long an uploaded file stays reusable for the same room after its last use.</summary>
     public int CacheMinutes { get; set; } = 15;
     /// <summary>Minimum gap between progress packets per transfer.</summary>
