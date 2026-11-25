@@ -148,9 +148,12 @@ public sealed class TestPlayer : IAsyncDisposable
         Hub.On<T>(method, p => { lock (_messages) _messages.Add((method, p)); });
 
     public static Task<TestPlayer> ConnectAsync(ServerFactory factory, string name, params TestLevel[] levels) =>
-        ConnectAsync(factory, name, osuSkipVideo: false, levels);
+        ConnectAsync(factory, name, osuSkipVideo: false, fnfChartOnly: false, levels);
 
-    public static async Task<TestPlayer> ConnectAsync(ServerFactory factory, string name, bool osuSkipVideo, params TestLevel[] levels)
+    public static Task<TestPlayer> ConnectAsync(ServerFactory factory, string name, bool osuSkipVideo, params TestLevel[] levels) =>
+        ConnectAsync(factory, name, osuSkipVideo, fnfChartOnly: false, levels);
+
+    public static async Task<TestPlayer> ConnectAsync(ServerFactory factory, string name, bool osuSkipVideo, bool fnfChartOnly, params TestLevel[] levels)
     {
         var p = new TestPlayer(factory, name);
         p.Levels.AddRange(levels);
@@ -158,7 +161,7 @@ public sealed class TestPlayer : IAsyncDisposable
         var hello = await p.Hub.InvokeAsync<HelloResult>("Hello", new HelloRequest
         {
             PlayerId = p.PlayerId, Username = name, ColorHue = 120, ProtocolVersion = Protocol.Version,
-            OsuSkipVideo = osuSkipVideo,
+            OsuSkipVideo = osuSkipVideo, FnfChartOnly = fnfChartOnly,
         });
         Assert.True(hello.Ok, hello.Error);
         return p;

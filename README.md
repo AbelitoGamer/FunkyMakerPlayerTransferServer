@@ -57,7 +57,7 @@ return; the client buffers them.
 
 | | |
 |---|---|
-| Loading | 150 s; players who haven't loaded become spectators (round cancelled if fewer than 2 remain). |
+| Loading | `LoadingTimeoutSeconds` (180 s); players who haven't loaded become spectators (round cancelled if fewer than 2 remain). |
 | Finishing | 30 s after the first player finishes; missing players are ranked with their last live state. |
 | Silence | A match player who sends no state / hit / key press for 10 s after the song start is out of the match ("stopped responding"); the round ends as soon as everybody left is done. |
 | Connection | SignalR client timeout 90 s (keep-alive 10 s). |
@@ -74,7 +74,8 @@ leaves or spectates, or new settings disallow it). `FinishMatch` with `Quit` als
 | `GET /health` | Status, protocol, limits, counters. Also wakes a sleeping instance. |
 | `GET /api/server/info`, `/api/leaderboard`, `/api/users`, `/api/users/{id}` | Official server API. |
 | `GET /api/verified_levels`, `/api/verified_levels/{id}/download` | Official levels. |
-| `PUT/GET /api/transfers/{id}/file` | Level transfers. |
+| `PUT/GET /api/transfers/{id}/file` | Level transfers (legacy single-PUT upload + download). |
+| `PUT /api/transfers/{id}/chunks?offset=N` + `POST /api/transfers/{id}/complete` | Chunked uploads (4 MB blocks, idempotent retries per offset; bypasses proxy ~100 s request timeouts). |
 | `PUT/GET /api/replays` | Replay tracks. |
 | `GET /api/testing` | Test-build gate: `{"open": bool, "message": string}`. |
 
@@ -99,9 +100,11 @@ Environment tab; saving redeploys the service.
 | `MaxLevelsPerMember` | 5000 | Every osu! difficulty is an entry. |
 | `StallTimeoutSeconds` | 300 | Inactivity timeout for uploads and in-progress download streams. |
 | `DownloadCompletionGraceSeconds` | 600 | Extra grace after Kestrel finishes writing a download response to a reverse proxy before `CompleteDownload` is required. |
+| `LoadingTimeoutSeconds` | 180 | Max time a match waits in `loading` before slow loaders become spectators. |
 | `CacheMinutes` | 15 | Uploaded levels stay reusable in the room this long. |
 | `ProgressIntervalMs` | 200 | Room state throttle while downloading. |
-| `HttpRequestsPerMinute` | 60 | Per IP, on `/api/transfers` and `/api/replays`. |
+| `HttpRequestsPerMinute` | 360 | Per IP, on `/api/transfers` and `/api/replays` (sized for chunked uploads). |
+| `UploadChunkMegabytes` | 4 | Preferred chunk size advertised in `HelloResult.UploadChunkBytes` (1–16 MB). |
 | `StorageDirectory` | temp | Wiped on start. |
 
 ## Run / test locally

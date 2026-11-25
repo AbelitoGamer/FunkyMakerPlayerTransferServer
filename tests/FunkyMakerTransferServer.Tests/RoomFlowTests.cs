@@ -827,6 +827,98 @@ public sealed class RoomFlowTests : IDisposable
         protected override bool TryComputeLength(out long length) { length = data.Length; return true; }
     }
 
+    [Fact]
+    public async Task Chunked_upload_with_idempotent_retry_completes_and_delivers_exact_file()
+    {
+        var lvl = TestLevel.Create("ChunkedLevel", 350_000);
+        await using var a = await TestPlayer.ConnectAsync(_factory, "A", lvl);
+        await using var b = await TestPlayer.ConnectAsync(_factory, "B");
+        string id = await a.CreateAsync();
+        await b.JoinAsync(id);
+
+        Assert.True((await a.PickLocalAsync(lvl)).Ok);
+        var up = await a.WaitFor<TransferUploadPacket>(Protocol.TransferUpload);
+
+        using var http = _factory.CreateClient();
+        const int chunkSize = 100_000;
+        for (int offset = 0; offset < lvl.Bytes.Length; offset += chunkSize)
+        {
+            int len = Math.Min(chunkSize, lvl.Bytes.Length - offset);
+            async Task SendChunk()
+            {
+                using var req = new HttpRequestMessage(HttpMethod.Put, $"/api/transfers/{up.TransferId}/chunks?offset={offset}")
+                {
+                    Content = new ByteArrayContent(lvl.Bytes, offset, len),
+                };
+                req.Headers.Add(Protocol.TokenHeader, up.Token);
+                (await http.SendAsync(req)).EnsureSuccessStatusCode();
+            }
+
+            await SendChunk();
+            // Simulate an idempotent retry of chunk #1 at the exact same offset.
+            if (offset == chunkSize)
+                await SendChunk();
+        }
+
+        using (var completeReq = new HttpRequestMessage(HttpMethod.Post, $"/api/transfers/{up.TransferId}/complete"))
+        {
+            completeReq.Headers.Add(Protocol.TokenHeader, up.Token);
+            (await http.SendAsync(completeReq)).EnsureSuccessStatusCode();
+        }
+
+        var down = await b.WaitFor<TransferDownloadPacket>(Protocol.TransferDownload);
+        var bytes = await b.DownloadAsync(down);
+        Assert.Equal(lvl.Hash, Convert.ToHexStringLower(SHA256.HashData(bytes)));
+        await b.Hub.InvokeAsync("CompleteDownload", down.TransferId, true, (string?)null);
+        var st = await a.WaitState(x => x.Members.Any(m => m.Id == b.PlayerId && m.LevelStatus == Protocol.LevelReady));
+        Assert.Equal(Protocol.LevelReady, st.Members.Single(m => m.Id == b.PlayerId).LevelStatus);
+    }
+
+    [Fact]
+    public async Task Fnf_chart_only_variant_is_sent_separately_and_does_not_make_receiver_a_full_holder()
+    {
+        var lvl = TestLevel.Create("HeavyFnf", 400_000);
+        await using var a = await TestPlayer.ConnectAsync(_factory, "A", lvl);
+        await using var b = await TestPlayer.ConnectAsync(_factory, "B");
+        await using var c = await TestPlayer.ConnectAsync(_factory, "C", osuSkipVideo: false, fnfChartOnly: true);
+        string id = await a.CreateAsync(new RoomSettings { Mode = Protocol.ModeTeams, MaxPlayers = 4 });
+        await b.JoinAsync(id);
+        await c.JoinAsync(id);
+
+        Assert.True((await a.PickLocalAsync(lvl)).Ok);
+
+        // B wants full level, C wants chartonly: server requests one upload per variant.
+        var fullUp = await a.WaitFor<TransferUploadPacket>(Protocol.TransferUpload, u => u.Variant == Protocol.VariantFull);
+        var chartUp = await a.WaitFor<TransferUploadPacket>(Protocol.TransferUpload, u => u.Variant == Protocol.VariantChartOnly);
+        Assert.Equal(lvl.Bytes.Length, fullUp.Size);
+        Assert.Equal(0, chartUp.Size); // packed variant size is only known after upload
+
+        var chartOnlyBytes = TestLevel.Package(30_000);
+        (await a.UploadAsync(fullUp, lvl.Bytes)).EnsureSuccessStatusCode();
+        (await a.UploadAsync(chartUp, chartOnlyBytes)).EnsureSuccessStatusCode();
+
+        var bDown = await b.WaitFor<TransferDownloadPacket>(Protocol.TransferDownload);
+        var cDown = await c.WaitFor<TransferDownloadPacket>(Protocol.TransferDownload);
+        Assert.Equal(Protocol.VariantFull, bDown.Variant);
+        Assert.Equal(Protocol.VariantChartOnly, cDown.Variant);
+        Assert.Equal(chartOnlyBytes.Length, cDown.Size);
+
+        var bBytes = await b.DownloadAsync(bDown);
+        var cBytes = await c.DownloadAsync(cDown);
+        Assert.Equal(lvl.Hash, Convert.ToHexStringLower(SHA256.HashData(bBytes)));
+        Assert.Equal(cDown.FileHash, Convert.ToHexStringLower(SHA256.HashData(cBytes)));
+
+        await b.Hub.InvokeAsync("CompleteDownload", bDown.TransferId, true, (string?)null);
+        await c.Hub.InvokeAsync("CompleteDownload", cDown.TransferId, true, (string?)null);
+
+        await a.WaitState(x => x.Members.All(m => m.LevelStatus == Protocol.LevelReady));
+        // Only B became a full holder (A doesn't count itself in Holders); C stayed chart-only.
+        var roomLvl = a.State.Levels!.Single(l => l.Hash == lvl.Hash);
+        Assert.Single(roomLvl.Holders);
+        Assert.Contains(b.PlayerId, roomLvl.Holders);
+        Assert.DoesNotContain(c.PlayerId, roomLvl.Holders);
+    }
+
     // ── Helpers ──────────────────────────────────────────────────────────────
 
     private static async Task PlayRoundAsync(TestLevel lvl, TestPlayer picker, params TestPlayer[] players)

@@ -109,6 +109,8 @@ app.MapHub<RoomHub>("/multiplayer");
 
 var api = app.MapGroup("/api/transfers").RequireRateLimiting("api");
 api.MapPut("/{id}/file", TransferEndpoints.UploadAsync);
+api.MapPut("/{id}/chunks", TransferEndpoints.UploadChunkAsync);
+api.MapPost("/{id}/complete", TransferEndpoints.CompleteChunkedUploadAsync);
 api.MapGet("/{id}/file", TransferEndpoints.DownloadAsync);
 
 var replays = app.MapGroup("/api/replays").RequireRateLimiting("api");

@@ -27,10 +27,12 @@ public static class Protocol
     public const string SongTypesOsu = "osu";
     public const string SongTypesBoth = "both";
 
-    // ── osu! set transfer variants ───────────────────────────────────────────
+    // ── Transfer variants (osu!: novideo; fnf: chartonly) ────────────────────
     public const string VariantFull = "full";
     /// <summary>The set without its video file(s) (players who chose to skip videos).</summary>
     public const string VariantNoVideo = "novideo";
+    /// <summary>FNF level stripped to chart JSON + music only (no sprite PNGs), for low-RAM devices.</summary>
+    public const string VariantChartOnly = "chartonly";
 
     // ── Server → client methods ──────────────────────────────────────────────
     public const string RoomState = "RoomState";
@@ -106,6 +108,8 @@ public sealed class HelloRequest
     public int ProtocolVersion { get; set; }
     /// <summary>Receive osu! sets without their video (smaller downloads). Sent again when it changes.</summary>
     public bool OsuSkipVideo { get; set; }
+    /// <summary>Receive FNF levels as chart + music only (no sprites). Sent again when it changes.</summary>
+    public bool FnfChartOnly { get; set; }
 }
 
 public sealed class HelloResult
@@ -117,6 +121,12 @@ public sealed class HelloResult
     public long MaxUploadBytes { get; set; }
     /// <summary>Highest player limit a host may give a room (Transfer:MaxRoomMembers).</summary>
     public int MaxRoomPlayers { get; set; } = Protocol.MaxPlayers;
+    /// <summary>True when the server accepts chunked uploads via PUT /api/transfers/{id}/chunks + POST /complete.</summary>
+    public bool SupportsChunkedUpload { get; set; }
+    /// <summary>True when the server supports FNF chart-only variant transfers.</summary>
+    public bool SupportsFnfChartOnly { get; set; }
+    /// <summary>Preferred chunk size in bytes for chunked uploads (0 = client default).</summary>
+    public int UploadChunkBytes { get; set; }
 }
 
 public sealed class OpResult

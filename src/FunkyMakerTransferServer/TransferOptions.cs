@@ -20,14 +20,19 @@ public sealed class TransferOptions
     /// draining any reverse-proxy buffer, verifying SHA-256 and reporting CompleteDownload.
     /// </summary>
     public int DownloadCompletionGraceSeconds { get; set; } = 600;
+    /// <summary>Max time a match waits in PhaseLoading before slow loaders become spectators.</summary>
+    public int LoadingTimeoutSeconds { get; set; } = 180;
     /// <summary>How long an uploaded file stays reusable for the same room after its last use.</summary>
     public int CacheMinutes { get; set; } = 15;
     /// <summary>Minimum gap between progress packets per transfer.</summary>
     public int ProgressIntervalMs { get; set; } = 200;
-    /// <summary>HTTP requests per minute per IP on /api.</summary>
-    public int HttpRequestsPerMinute { get; set; } = 60;
+    /// <summary>HTTP requests per minute per IP on /api (high enough for chunked uploads).</summary>
+    public int HttpRequestsPerMinute { get; set; } = 360;
+    /// <summary>Preferred chunk size (MB) advertised to clients for chunked uploads (clamped 1..16 MB).</summary>
+    public int UploadChunkMegabytes { get; set; } = 4;
     /// <summary>Where uploads are stored; empty = a folder under the system temp directory.</summary>
     public string StorageDirectory { get; set; } = "";
 
     public long MaxUploadBytes => MaxUploadMegabytes * 1024L * 1024L;
+    public int UploadChunkBytes => Math.Clamp(UploadChunkMegabytes, 1, 16) * 1024 * 1024;
 }
