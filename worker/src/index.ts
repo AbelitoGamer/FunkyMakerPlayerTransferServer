@@ -143,10 +143,16 @@ async function route(request: Request, env: Env): Promise<Response> {
   if (method === "POST" && path === "/api/admin/import") {
     if (!env.ADMIN_TOKEN || request.headers.get("Authorization") !== `Bearer ${env.ADMIN_TOKEN}`)
       return new Response("Unauthorized", { status: 401 });
-    const body = (await request.json()) as { players?: unknown[]; matches?: unknown[]; Players?: unknown[]; Matches?: unknown[] };
+    const body = (await request.json()) as {
+      players?: unknown[];
+      matches?: unknown[];
+      Players?: unknown[];
+      Matches?: unknown[];
+      replace?: boolean;
+    };
     const players = body.players ?? body.Players ?? [];
     const matches = body.matches ?? body.Matches ?? [];
-    const res = await leaderboardStub(env).importData(Array.isArray(players) ? players : [], Array.isArray(matches) ? matches : []);
+    const res = await leaderboardStub(env).importData(Array.isArray(players) ? players : [], Array.isArray(matches) ? matches : [], body.replace === true);
     return Response.json({ imported: res });
   }
 

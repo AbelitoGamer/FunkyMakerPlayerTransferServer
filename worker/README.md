@@ -44,8 +44,9 @@ npm run sync-levels    # copy ../src/.../verified_levels into the local bucket
    ```sh
    curl -X POST https://…/api/admin/import -H "Authorization: Bearer <token>" \
         -H "Content-Type: application/json" \
-        -d '{"players": <global_leaderboard.json>, "matches": <match_history.json>}'
+        -d '{"players": <global_leaderboard.json>, "matches": <match_history.json>, "replace": false}'
    ```
+   `"replace": true` wipes the leaderboard, match history and user directory first (e.g. to remove test data).
 
 Settings live in `wrangler.toml` `[vars]` (same knobs as the `Transfer__*` / `Testing__*` env vars).
 `HUB_LOCATION_HINT` chooses the region of the room server the first time it's created (e.g. `sam`

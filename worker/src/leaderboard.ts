@@ -88,7 +88,14 @@ export class Leaderboard extends DurableObject<Env> {
    * Imports the old server's data (global_leaderboard.json / match_history.json, or a MongoDB
    * export of the same documents). Existing players / matches with the same ids are replaced.
    */
-  async importData(players: unknown[], matches: unknown[]): Promise<{ players: number; matches: number }> {
+  /** Adds players / matches (e.g. from the old server). replace = wipe everything first (players, matches, profiles). */
+  async importData(players: unknown[], matches: unknown[], replace = false): Promise<{ players: number; matches: number }> {
+    if (replace) {
+      this.sql.exec(`DELETE FROM players`);
+      this.sql.exec(`DELETE FROM matches`);
+      this.sql.exec(`DELETE FROM profiles`);
+      this.book.load([], [], []);
+    }
     let pc = 0,
       mc = 0;
     for (const raw of players) {
