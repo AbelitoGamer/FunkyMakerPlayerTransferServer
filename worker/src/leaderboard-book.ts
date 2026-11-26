@@ -385,6 +385,7 @@ export class LeaderboardBook {
     for (const m of this.matches) {
       merge(m.player1, m.timestamp);
       merge(m.player2, m.timestamp);
+      for (const p of m.players) merge(p, m.timestamp);
     }
     for (const e of this.players.values()) {
       users.set(e.playerId, {
