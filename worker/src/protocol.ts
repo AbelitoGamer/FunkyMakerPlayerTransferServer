@@ -4,11 +4,13 @@
 
 export const Protocol = {
   /**
+   * 5 = Discord accounts: Hello carries a session token (without one the connection is a guest, who
+   *     can't create or join rooms); every player packet carries an avatar URL.
    * 4 = Cloudflare Workers server: plain WebSocket envelope instead of SignalR (see hub.ts),
    *     chunked uploads as R2 multipart parts, X-File-Hash on packed uploads.
    * 3 = osu!mania songs. 2 = room system. 1 = old pair-transfer server.
    */
-  Version: 4,
+  Version: 5,
 
   KindFnf: "fnf",
   KindOsu: "osu",
@@ -93,6 +95,21 @@ export interface HelloRequest {
   protocolVersion: number;
   osuSkipVideo: boolean;
   fnfChartOnly: boolean;
+  /** Session token from the Discord login; empty = guest. (playerId / username are ignored since protocol 5.) */
+  sessionToken: string;
+}
+
+/** The Discord account a session is logged in as. */
+export interface AccountInfo {
+  /** Discord user id (= the PlayerId everywhere). */
+  playerId: string;
+  /** Shown name: the Discord display name, or the unique username when the display name has nothing the game can draw. */
+  username: string;
+  /** Unique Discord username (lower-case). */
+  discordUsername: string;
+  /** Avatar PNG URL (cdn.discordapp.com). */
+  avatar: string;
+  colorHue: number;
 }
 
 export interface HelloResult {
@@ -105,6 +122,13 @@ export interface HelloResult {
   supportsChunkedUpload: boolean;
   supportsFnfChartOnly: boolean;
   uploadChunkBytes: number;
+  /** True for a guest (no or refused token): leaderboards and the room list only, no rooms. */
+  guest: boolean;
+  account: AccountInfo | null;
+  /** Renewed session token (valid 30 days from now): the client saves it. Empty for guests. */
+  sessionToken: string;
+  /** Why the token was refused ("expired" / "invalid"); empty otherwise. */
+  authError: string;
 }
 
 export interface OpResult {
@@ -166,6 +190,7 @@ export interface RoomPlayerSummary {
   id: string;
   username: string;
   colorHue: number;
+  avatar: string;
 }
 
 export interface RoomSummary {
@@ -204,6 +229,7 @@ export interface RoomMember {
   id: string;
   username: string;
   colorHue: number;
+  avatar: string;
   isHost: boolean;
   status: string;
   spectate: boolean;
@@ -255,6 +281,7 @@ export interface PlayerResult {
   playerId: string;
   username: string;
   colorHue: number;
+  avatar: string;
   side: number;
   team: number;
   score: number;
@@ -283,6 +310,8 @@ export interface ChatMessage {
   playerId: string;
   username: string;
   colorHue: number;
+  /** Sender's avatar URL ("" for system messages). */
+  avatar: string;
   text: string;
   system: boolean;
   timestamp: number;

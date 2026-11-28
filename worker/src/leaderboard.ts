@@ -2,6 +2,7 @@
 // Persistent across deploys, unlike the JSON files on Render's free-plan disk.
 
 import { DurableObject } from "cloudflare:workers";
+import type { DiscordUser, PendingLogin, StoredAccount } from "./accounts";
 import type { Env } from "./env";
 import type { RoundResult } from "./protocol";
 import { str } from "./protocol";
@@ -27,6 +28,9 @@ export class Leaderboard extends DurableObject<Env> {
       this.sql.exec(`CREATE TABLE IF NOT EXISTS players (id TEXT PRIMARY KEY, data TEXT NOT NULL)`);
       this.sql.exec(`CREATE TABLE IF NOT EXISTS matches (id TEXT PRIMARY KEY, ts INTEGER NOT NULL, data TEXT NOT NULL)`);
       this.sql.exec(`CREATE TABLE IF NOT EXISTS profiles (id TEXT PRIMARY KEY, data TEXT NOT NULL)`);
+      // Discord accounts (protocol 5) and logins in progress (accounts.ts).
+      this.sql.exec(`CREATE TABLE IF NOT EXISTS accounts (id TEXT PRIMARY KEY, data TEXT NOT NULL)`);
+      this.sql.exec(`CREATE TABLE IF NOT EXISTS logins (id TEXT PRIMARY KEY, expires INTEGER NOT NULL, data TEXT NOT NULL)`);
       const parse = (rows: Iterable<Record<string, SqlStorageValue>>) => [...rows].map((r) => JSON.parse(String(r.data)));
       this.book.load(
         parse(this.sql.exec(`SELECT data FROM players`)),
@@ -34,6 +38,89 @@ export class Leaderboard extends DurableObject<Env> {
         parse(this.sql.exec(`SELECT data FROM profiles`)),
       );
     });
+  }
+
+  // ── Accounts ──────────────────────────────────────────────────────────────
+
+  async account(id: string): Promise<StoredAccount | null> {
+    const row = [...this.sql.exec(`SELECT data FROM accounts WHERE id = ?`, id)][0];
+    return row ? (JSON.parse(String(row.data)) as StoredAccount) : null;
+  }
+
+  async saveAccount(a: StoredAccount): Promise<void> {
+    this.sql.exec(`INSERT OR REPLACE INTO accounts (id, data) VALUES (?, ?)`, a.id, JSON.stringify(a));
+  }
+
+  /** A Hello with a valid token: remembers the colour the game uses and when the player was last seen. */
+  async touchAccount(id: string, colorHue: number): Promise<StoredAccount | null> {
+    const a = await this.account(id);
+    if (!a) return null;
+    a.colorHue = colorHue;
+    a.lastSeenAt = Date.now();
+    await this.saveAccount(a);
+    return a;
+  }
+
+  /** Logs in with a Discord user: a new account, or the existing one with its name / avatar / tokens updated. */
+  async upsertDiscordAccount(
+    user: DiscordUser,
+    tokens: { accessToken: string; refreshToken: string; tokenExpiresAt: number },
+  ): Promise<StoredAccount> {
+    const now = Date.now();
+    const a: StoredAccount = (await this.account(user.id)) ?? {
+      id: user.id,
+      username: "",
+      globalName: "",
+      avatarHash: "",
+      colorHue: 180,
+      accessToken: "",
+      refreshToken: "",
+      tokenExpiresAt: 0,
+      refreshedAt: 0,
+      createdAt: now,
+      lastSeenAt: now,
+    };
+    a.username = str(user.username);
+    a.globalName = str(user.global_name ?? "");
+    a.avatarHash = str(user.avatar ?? "");
+    a.accessToken = tokens.accessToken;
+    a.refreshToken = tokens.refreshToken;
+    a.tokenExpiresAt = tokens.tokenExpiresAt;
+    a.refreshedAt = now;
+    a.lastSeenAt = now;
+    await this.saveAccount(a);
+    return a;
+  }
+
+  // ── Logins in progress ────────────────────────────────────────────────────
+
+  async createLogin(login: PendingLogin): Promise<void> {
+    this.sql.exec(`DELETE FROM logins WHERE expires < ?`, Date.now());
+    this.sql.exec(`INSERT OR REPLACE INTO logins (id, expires, data) VALUES (?, ?, ?)`, login.id, login.expiresAt, JSON.stringify(login));
+  }
+
+  async login(id: string): Promise<PendingLogin | null> {
+    const row = [...this.sql.exec(`SELECT data FROM logins WHERE id = ? AND expires >= ?`, id, Date.now())][0];
+    return row ? (JSON.parse(String(row.data)) as PendingLogin) : null;
+  }
+
+  /** The browser came back from Discord: the login is done (playerId) or failed (error). Only once. */
+  async finishLogin(id: string, playerId: string, error: string): Promise<boolean> {
+    const login = await this.login(id);
+    if (!login || login.playerId || login.error) return false;
+    login.playerId = playerId;
+    login.error = error;
+    this.sql.exec(`UPDATE logins SET data = ? WHERE id = ?`, JSON.stringify(login), id);
+    return true;
+  }
+
+  /** The game asks how its login is going; a finished login is handed out once and then forgotten. */
+  async pollLogin(id: string, pollKey: string): Promise<{ status: "pending" | "ok" | "error"; playerId: string; error: string }> {
+    const login = await this.login(id);
+    if (!login || login.pollKey !== pollKey) return { status: "error", playerId: "", error: "The login expired. Try again." };
+    if (!login.playerId && !login.error) return { status: "pending", playerId: "", error: "" };
+    this.sql.exec(`DELETE FROM logins WHERE id = ?`, id);
+    return login.playerId ? { status: "ok", playerId: login.playerId, error: "" } : { status: "error", playerId: "", error: login.error };
   }
 
   private savePlayer(p: LeaderboardEntry): void {

@@ -1,9 +1,17 @@
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { expect } from "vitest";
 import { Protocol, type LevelEntry, type RoomSettings, type RoomStatePacket } from "../src/protocol";
-import { Effects, RoomRegistry, type OfficialLevel, type RegistryOptions } from "../src/registry";
+import { Effects, RoomRegistry, type OfficialLevel, type RegistryOptions, type SessionIdentity } from "../src/registry";
 
 export const sha256 = (b: Uint8Array) => createHash("sha256").update(b).digest("hex");
+
+/** A logged-in account, as the hub would pass it after checking the session token. */
+export const identityOf = (playerId: string, name: string): SessionIdentity => ({
+  playerId,
+  username: name,
+  discordUsername: name.toLowerCase(),
+  avatar: `https://cdn.discordapp.com/embed/avatars/0.png`,
+});
 
 /** Registry driven by a fake clock; every message is delivered to the TestPlayer with that connection. */
 export class World {
@@ -47,8 +55,9 @@ export class World {
     const hello = this.run((fx) =>
       this.registry.hello(
         p.conn,
-        { playerId: p.playerId, username: name, colorHue: 120, protocolVersion: Protocol.Version, ...prefs },
+        { colorHue: 120, protocolVersion: Protocol.Version, ...prefs },
         fx,
+        identityOf(p.playerId, name),
       ),
     );
     expect(hello.ok, hello.error).toBe(true);

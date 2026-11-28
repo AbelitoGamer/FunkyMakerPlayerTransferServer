@@ -4,7 +4,7 @@
 import { describe, expect, it } from "vitest";
 import { Protocol, type MatchInfo, type RoundResult, type TransferDownloadPacket, type TransferUploadPacket } from "../src/protocol";
 import { SilenceTimeoutMs, CountdownMs, Effects } from "../src/registry";
-import { TestLevel, World, sha256, type TestPlayer } from "./helpers";
+import { TestLevel, World, identityOf, sha256, type TestPlayer } from "./helpers";
 
 const upload = (p: TestPlayer, pred: (u: TransferUploadPacket) => boolean = () => true) =>
   p.all<TransferUploadPacket>(Protocol.TransferUpload).filter(pred).at(-1)!;
@@ -65,7 +65,7 @@ describe("session / browser", () => {
   it("follows MaxRoomMembers for the player limit (default 8)", () => {
     const w = new World({ maxRoomMembers: 12 });
     const a = w.connect("A");
-    expect(w.run((fx) => w.registry.hello(a.conn, { playerId: a.playerId, username: "A", protocolVersion: Protocol.Version }, fx)).maxRoomPlayers).toBe(12);
+    expect(w.run((fx) => w.registry.hello(a.conn, { protocolVersion: Protocol.Version }, fx, identityOf(a.playerId, "A"))).maxRoomPlayers).toBe(12);
     expect(w.run((fx) => w.registry.createRoom(a.conn, { settings: { maxPlayers: 13 } }, fx)).ok).toBe(false);
     a.create({ maxPlayers: 12 });
     expect(a.state.settings.maxPlayers).toBe(12);
@@ -84,7 +84,7 @@ describe("session / browser", () => {
     // Same player id on a new connection.
     const b2 = w.connect("B");
     (b2 as { playerId: string }).playerId = b.playerId;
-    w.run((fx) => w.registry.hello(b2.conn, { playerId: b.playerId, username: "B", protocolVersion: Protocol.Version }, fx));
+    w.run((fx) => w.registry.hello(b2.conn, { protocolVersion: Protocol.Version }, fx, identityOf(b.playerId, "B")));
     b2.join(id);
     expect(b.latest(Protocol.Kicked)).toBeDefined();
     expect(b2.state.members).toHaveLength(2);

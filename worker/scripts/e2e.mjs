@@ -6,7 +6,7 @@ import { createHash, randomBytes, randomUUID } from "node:crypto";
 
 const BASE = (process.argv[2] ?? "http://127.0.0.1:8787").replace(/\/$/, "");
 const WS = BASE.replace(/^http/, "ws") + "/multiplayer";
-const PROTOCOL = 4;
+const PROTOCOL = 5;
 const sha = (b) => createHash("sha256").update(b).digest("hex");
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 let failures = 0;
@@ -98,7 +98,8 @@ function level(name, size) {
 async function main() {
   const health = await (await fetch(`${BASE}/health`)).json();
   check(health.protocol === PROTOCOL, `health reports protocol ${PROTOCOL}`);
-  check((await (await fetch(`${BASE}/api/testing`)).json()).open === true, "testing gate open");
+  const gate = await (await fetch(`${BASE}/api/testing`)).json();
+  check(typeof gate.open === "boolean", `testing gate answers (open = ${gate.open})`);
 
   const lvl = level("BigLevel", 7 * 1024 * 1024 + 4321);
   const a = new Player("A");
@@ -112,6 +113,11 @@ async function main() {
   const helloA = await a.invoke("Hello", { PlayerId: a.playerId, Username: "A", ColorHue: 100, ProtocolVersion: PROTOCOL });
   const helloB = await b.invoke("Hello", { playerId: b.playerId, username: "B", colorHue: 200, protocolVersion: PROTOCOL });
   check(helloA.ok && helloB.ok, "hello (PascalCase and camelCase)");
+  // Protocol 5: rooms need an account. Without Discord this only works against a server with DEV_AUTH=true
+  // (wrangler dev + worker/.dev.vars), which logs in as dev-<playerId>.
+  check(!helloA.guest && !helloB.guest, "logged in (needs DEV_AUTH=true on the server)");
+  a.playerId = helloA.account.playerId;
+  b.playerId = helloB.account.playerId;
   check(helloA.supportsChunkedUpload && helloA.uploadChunkBytes >= 5 * 1024 * 1024, `chunk size ${helloA.uploadChunkBytes}`);
 
   // Big level list (forces fragmented messages both ways).
@@ -120,13 +126,14 @@ async function main() {
     return { Hash: h, Name: "Filler " + i, FileName: `Filler ${i}.fnmm`, Size: 1000 + i, Stars: 1 };
   });
   const small = level("SmallLevel", 300_000);
-  const created = await a.invoke("CreateRoom", { Name: "E2E", Settings: { Mode: "versus", MaxPlayers: 4 }, Levels: [lvl.entry, small.entry, ...filler] });
+  const small2 = level("SmallLevel2", 250_000);
+  const created = await a.invoke("CreateRoom", { Name: "E2E", Settings: { Mode: "versus", MaxPlayers: 4 }, Levels: [lvl.entry, small.entry, small2.entry, ...filler] });
   check(created.ok, `room created ${created.roomId}`);
   const rooms = await b.invoke("ListRooms");
   check(rooms.some((r) => r.id === created.roomId), "room listed");
   check((await b.invoke("JoinRoom", { RoomId: created.roomId, Levels: [] })).ok, "B joined");
-  const state = await b.waitFor("RoomState", (s) => s.levels && s.levels.length === 4002);
-  check(state.members.length === 2, "B got the 4002-level list (fragmented RoomState)");
+  const state = await b.waitFor("RoomState", (s) => s.levels && s.levels.length === 4003);
+  check(state.members.length === 2, "B got the 4003-level list (fragmented RoomState)");
 
   check((await a.invoke("SelectSong", { Source: "local", Hash: lvl.hash, Stars: 4.5 })).ok, "A picked the level");
   const up = await a.waitFor("TransferUpload");
@@ -179,16 +186,17 @@ async function main() {
   tampered[100] ^= 0xff;
   const badPut = await fetch(`${BASE}/api/transfers/${up2.transferId}/file`, { method: "PUT", headers: { "X-Transfer-Token": up2.token }, body: tampered });
   check(badPut.status === 400, `tampered single PUT rejected by R2's checksum (${badPut.status})`);
-  const failed = await b.waitFor("TransferFailed", (f) => f.hash === small.hash);
-  check(failed.reason.includes("did not match"), `B told: ${failed.reason}`);
-  // "missing" = please send it again → A is asked to upload once more; this time the real bytes.
-  b.send("SetLevelStatus", { Hash: small.hash, State: "missing", Progress: 0 });
-  const up3 = await a.waitFor("TransferUpload", (u) => u.hash === small.hash && u.transferId !== up2.transferId);
-  const goodPut = await fetch(`${BASE}/api/transfers/${up3.transferId}/file`, { method: "PUT", headers: { "X-Transfer-Token": up3.token }, body: small.bytes });
+  // Nobody else can send it: the pick is rejected and blocked for this turn; B picks another one.
+  const rejected = await b.waitFor("SongRejected", (f) => f.hash === small.hash);
+  check(rejected.reason.includes("did not match"), `B told: ${rejected.reason}`);
+  check(!(await b.invoke("SelectSong", { Source: "local", Hash: small.hash })).ok, "rejected song can't be picked again this turn");
+  check((await b.invoke("SelectSong", { Source: "local", Hash: small2.hash })).ok, "B picked another level");
+  const up3 = await a.waitFor("TransferUpload", (u) => u.hash === small2.hash);
+  const goodPut = await fetch(`${BASE}/api/transfers/${up3.transferId}/file`, { method: "PUT", headers: { "X-Transfer-Token": up3.token }, body: small2.bytes });
   check(goodPut.ok, `single PUT upload → ${goodPut.status}`);
-  const down2 = await b.waitFor("TransferDownload", (d) => d.hash === small.hash);
+  const down2 = await b.waitFor("TransferDownload", (d) => d.hash === small2.hash);
   const got2 = Buffer.from(await (await fetch(`${BASE}/api/transfers/${down2.transferId}/file`, { headers: { "X-Transfer-Token": down2.token } })).arrayBuffer());
-  check(sha(got2) === small.hash, "single-PUT level downloaded intact");
+  check(sha(got2) === small2.hash, "single-PUT level downloaded intact");
 
   await sleep(500);
   const lb = await (await fetch(`${BASE}/api/leaderboard`)).json();

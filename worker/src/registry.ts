@@ -151,10 +151,22 @@ export type Ticket<T> = { ok: true; ticket: T } | { ok: false; error: string };
 
 // ── State types ────────────────────────────────────────────────────────────
 
+/** Who a Hello is from, as checked by the hub (Discord session token, or the local dev login). */
+export interface SessionIdentity {
+  playerId: string;
+  username: string;
+  discordUsername: string;
+  avatar: string;
+}
+
 class Session {
   playerId = "";
   username = "Player";
   colorHue = 180;
+  avatar = "";
+  /** No account: may look at the room list and leaderboards, can't create or join rooms. */
+  guest = true;
+  discordUsername = "";
   osuSkipVideo = false;
   fnfChartOnly = false;
   greeted = false;
@@ -240,6 +252,7 @@ class MatchState {
   firstFinishAt: number | null = null;
   names = new Map<string, string>();
   hues = new Map<string, number>();
+  avatars = new Map<string, string>();
   constructor(
     readonly info: MatchInfo,
     readonly createdAt: number,
@@ -318,6 +331,14 @@ export const CountdownMs = 4000;
 
 const HashRegex = /^[0-9a-f]{64}$/;
 
+/** What a guest (no Discord login) gets when trying to create or join a room. */
+export const GuestRoomError = "Log in with Discord to create or join rooms.";
+
+/** Only Discord CDN avatar URLs reach the clients (they download them). */
+export function safeAvatar(url: string): string {
+  return /^https:\/\/cdn\.discordapp\.com\/[A-Za-z0-9_./?=-]{1,200}$/.test(url) ? url : "";
+}
+
 function cacheKeyOf(hash: string, variant: string): string {
   return variant === Protocol.VariantFull ? hash : `${hash}:${variant}`;
 }
@@ -371,7 +392,11 @@ export class RoomRegistry {
   // Sessions
   // ══════════════════════════════════════════════════════════════════════
 
-  hello(connectionId: string, raw: Partial<HelloRequest>, fx: Effects): HelloResult {
+  /**
+   * identity = the account the hub verified (Discord session token or dev login); null = guest. The
+   * request's own playerId / username are not trusted any more (protocol 5).
+   */
+  hello(connectionId: string, raw: Partial<HelloRequest>, fx: Effects, identity: SessionIdentity | null = null): HelloResult {
     const request = raw ?? {};
     const protocolVersion = int(request.protocolVersion);
     const base: HelloResult = {
@@ -384,6 +409,10 @@ export class RoomRegistry {
       supportsChunkedUpload: false,
       supportsFnfChartOnly: false,
       uploadChunkBytes: 0,
+      guest: true,
+      account: null,
+      sessionToken: "",
+      authError: "",
     };
     if (protocolVersion !== Protocol.Version) {
       return {
@@ -392,18 +421,22 @@ export class RoomRegistry {
       };
     }
 
-    let playerId = clean(str(request.playerId), 64);
-    if (playerId.length === 0) playerId = "conn-" + connectionId;
+    const playerId = identity ? clean(identity.playerId, 64) : "guest-" + connectionId;
     let s = this.sessions.get(connectionId);
     if (!s) {
       s = new Session(connectionId);
       this.sessions.set(connectionId, s);
     }
+    // Logged out / switched account on this connection: leave the room first (it belongs to the old player).
+    if (s.member && (identity === null || s.playerId !== playerId)) this.removeMember(s.member, fx, `${s.username} left.`);
     const osuSkipVideo = bool(request.osuSkipVideo);
     const fnfChartOnly = bool(request.fnfChartOnly);
     const variantPrefChanged = s.osuSkipVideo !== osuSkipVideo || s.fnfChartOnly !== fnfChartOnly;
     s.playerId = playerId;
-    s.username = cleanName(str(request.username), "Player");
+    s.guest = identity === null;
+    s.username = identity ? cleanName(identity.username, "Player") : "Guest";
+    s.discordUsername = identity ? clean(identity.discordUsername, 40) : "";
+    s.avatar = identity ? safeAvatar(identity.avatar) : "";
     s.colorHue = clamp(int(request.colorHue, 180), 0, 360);
     s.osuSkipVideo = osuSkipVideo;
     s.fnfChartOnly = fnfChartOnly;
@@ -427,13 +460,17 @@ export class RoomRegistry {
       supportsChunkedUpload: true,
       supportsFnfChartOnly: true,
       uploadChunkBytes: this.uploadChunkBytes,
+      guest: s.guest,
+      account: s.guest
+        ? null
+        : { playerId: s.playerId, username: s.username, discordUsername: s.discordUsername, avatar: s.avatar, colorHue: s.colorHue },
     };
   }
 
-  /** The session's player id/name/hue after a successful Hello (for the leaderboard's user directory). */
-  profileOf(connectionId: string): { playerId: string; username: string; colorHue: number } | null {
+  /** The session's player after a successful Hello (for the leaderboard's user directory); null for guests. */
+  profileOf(connectionId: string): { playerId: string; username: string; colorHue: number; avatar: string } | null {
     const s = this.sessions.get(connectionId);
-    return s && s.greeted ? { playerId: s.playerId, username: s.username, colorHue: s.colorHue } : null;
+    return s && s.greeted && !s.guest ? { playerId: s.playerId, username: s.username, colorHue: s.colorHue, avatar: s.avatar } : null;
   }
 
   ping(connectionId: string, clientTimestamp: number): PongPacket {
@@ -471,6 +508,7 @@ export class RoomRegistry {
           id: m.session.playerId,
           username: m.session.username,
           colorHue: m.session.colorHue,
+          avatar: m.session.avatar,
         })),
         playerCount: r.members.length,
         maxPlayers: r.settings.maxPlayers,
@@ -481,6 +519,7 @@ export class RoomRegistry {
     const request = raw ?? {};
     const s = this.sessions.get(connectionId);
     if (!s || !s.greeted) return OpResult.fail("Not connected.");
+    if (s.guest) return OpResult.fail(GuestRoomError);
 
     if (s.member) this.removeMember(s.member, fx, `${s.username} left.`);
 
@@ -504,6 +543,7 @@ export class RoomRegistry {
     const roomId = str(request.roomId).trim().toUpperCase();
     const s = this.sessions.get(connectionId);
     if (!s || !s.greeted) return OpResult.fail("Not connected.");
+    if (s.guest) return OpResult.fail(GuestRoomError);
     const room = this.rooms.get(roomId);
     if (!room) return OpResult.fail("That room doesn't exist any more.");
     if (s.member?.room === room) return OpResult.success(room.id);
@@ -652,6 +692,7 @@ export class RoomRegistry {
         playerId: m.session.playerId,
         username: m.session.username,
         colorHue: m.session.colorHue,
+        avatar: m.session.avatar,
         text: cleaned,
         system: false,
         timestamp: now,
@@ -1575,6 +1616,7 @@ export class RoomRegistry {
     for (const p of players) {
       match.names.set(p.session.playerId, p.session.username);
       match.hues.set(p.session.playerId, p.session.colorHue);
+      match.avatars.set(p.session.playerId, p.session.avatar);
     }
     room.match = match;
     room.phase = Protocol.PhaseLoading;
@@ -1631,6 +1673,7 @@ export class RoomRegistry {
         playerId: p.assignment.playerId,
         username: name,
         colorHue: hue,
+        avatar: member?.session.avatar ?? match.avatars.get(p.assignment.playerId) ?? "",
         side: p.assignment.side,
         team: p.assignment.team,
         score: 0,
@@ -1904,7 +1947,7 @@ export class RoomRegistry {
   }
 
   private addSystemChat(room: Room, text: string, fx: Effects): void {
-    this.addChat(room, { playerId: "", username: "", colorHue: 180, text, system: true, timestamp: this.now }, fx);
+    this.addChat(room, { playerId: "", username: "", colorHue: 180, avatar: "", text, system: true, timestamp: this.now }, fx);
   }
 
   private addChat(room: Room, msg: ChatMessage, fx: Effects): void {
@@ -1950,6 +1993,7 @@ export class RoomRegistry {
         id,
         username: m.session.username,
         colorHue: m.session.colorHue,
+        avatar: m.session.avatar,
         isHost: m === room.host,
         status,
         spectate: m.spectate,

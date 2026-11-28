@@ -2,6 +2,7 @@
 // live in the Hub Durable Object (WebSocket /multiplayer), the leaderboard in the Leaderboard
 // Durable Object (SQLite), level files and replays in R2.
 
+import { routeAuth } from "./auth";
 import { type Env, SERVER_VERSION, hubStub, leaderboardStub } from "./env";
 import { loadOfficialLevels, objectKeyFor } from "./official";
 import { Protocol } from "./protocol";
@@ -44,6 +45,10 @@ async function route(request: Request, env: Env): Promise<Response> {
   const seg = path.split("/").filter(Boolean);
 
   if (path === "/multiplayer") return hubStub(env).fetch(request);
+
+  // ── Discord login (auth.ts) ──
+  const auth = await routeAuth(request, env, url, path);
+  if (auth) return auth;
 
   if (method === "GET" && path === "/") return Response.redirect(new URL("/api/server/info", url).toString(), 302);
 
@@ -132,7 +137,8 @@ async function route(request: Request, env: Env): Promise<Response> {
         "GET /api/users/{playerId}",
         "GET /api/verified_levels",
         "GET /api/verified_levels/{id}/download",
-        "WS /multiplayer (JSON envelope, protocol 4)",
+        "POST /api/auth/start, POST /api/auth/poll, GET /auth/discord (Discord login)",
+        "WS /multiplayer (JSON envelope, protocol 5)",
       ],
     });
   }
