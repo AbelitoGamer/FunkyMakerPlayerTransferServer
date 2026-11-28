@@ -36,7 +36,7 @@ DOWNLOAD_COMPLETION_GRACE_SECONDS = "600"
 LOADING_TIMEOUT_SECONDS = "180"
 CACHE_MINUTES = "15"
 PROGRESS_INTERVAL_MS = "200"
-TESTING_OPEN = "true"
+TESTING_OPEN = "false"
 TESTING_MESSAGE = ""
 # Where the room server is created the first time (empty = near the first player who connects).
 # One of: wnam, enam, sam, weur, eeur, apac, oc, afr, me

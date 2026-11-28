@@ -28,6 +28,8 @@ export const Protocol = {
   TransferUpload: "TransferUpload",
   TransferDownload: "TransferDownload",
   TransferFailed: "TransferFailed",
+  /** A pick was dropped (the lobby voted no, or the level couldn't be sent): the picker picks again. */
+  SongRejected: "SongRejected",
   MatchLoading: "MatchLoading",
   MatchStart: "MatchStart",
   MatchResults: "MatchResults",
@@ -75,6 +77,10 @@ export const Protocol = {
   HardMaxPlayers: 32,
   MaxRoomNameLength: 32,
   MaxChatLength: 200,
+  /** Songs at least this long (seconds) need the lobby's OK (a vote) before they are played. */
+  LongSongSeconds: 240,
+  /** How long a song vote stays open (ms); members who didn't vote are left out of the count. */
+  SongVoteMs: 30_000,
 } as const;
 
 // ── Session ────────────────────────────────────────────────────────────────
@@ -131,6 +137,8 @@ export interface LevelEntry {
   setName: string;
   difficulty: string;
   sizeNoVideo: number;
+  /** Song length in seconds (end of the last note), 0 = unknown. */
+  duration: number;
 }
 
 export interface RoomSettings {
@@ -188,6 +196,8 @@ export interface SongInfo {
   setName: string;
   difficulty: string;
   sizeNoVideo: number;
+  /** Seconds, 0 = unknown. */
+  duration: number;
 }
 
 export interface RoomMember {
@@ -217,6 +227,7 @@ export interface RoomLevel {
   setName: string;
   difficulty: string;
   sizeNoVideo: number;
+  duration: number;
 }
 
 export interface MatchAssignment {
@@ -292,6 +303,31 @@ export interface RoomStatePacket {
   startBlocker: string;
   levels: RoomLevel[] | null;
   history: RoundResult[] | null;
+  /** A long song waiting for the lobby's vote, or null. */
+  songVote: SongVoteInfo | null;
+  /** Songs that can't be picked again this turn (rejected by the lobby or couldn't be sent). */
+  blockedHashes: string[];
+}
+
+export interface SongVoteInfo {
+  song: SongInfo;
+  yes: number;
+  no: number;
+  /** Players asked to vote (everybody playing except the picker, when the vote started). */
+  eligible: string[];
+  /** Who already voted. */
+  voted: string[];
+  /** Server time (ms) the vote closes. */
+  endsAt: number;
+  /** Your own vote: 1 yes, 0 no, -1 none. */
+  yourVote: number;
+}
+
+export interface SongRejectedPacket {
+  hash: string;
+  name: string;
+  reason: string;
+  pickedBy: string;
 }
 
 // ── Round flow ─────────────────────────────────────────────────────────────
@@ -302,6 +338,8 @@ export interface SongSelection {
   name: string;
   officialId: string;
   stars: number;
+  /** Song length in seconds as the picker's game measured it (0 = unknown). */
+  duration: number;
 }
 
 export interface LevelStatusUpdate {

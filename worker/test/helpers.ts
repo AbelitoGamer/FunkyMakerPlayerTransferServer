@@ -184,8 +184,12 @@ export class TestPlayer {
     expect(res.ok, res.error).toBe(true);
   }
 
-  pickLocal(level: TestLevel) {
-    return this.w.run((fx) => this.r.selectSong(this.conn, { source: Protocol.SourceLocal, hash: level.hash, stars: 4.2 }, fx));
+  pickLocal(level: TestLevel, duration = 0) {
+    return this.w.run((fx) => this.r.selectSong(this.conn, { source: Protocol.SourceLocal, hash: level.hash, stars: 4.2, duration }, fx));
+  }
+
+  voteSong(yes: boolean) {
+    return this.w.run((fx) => this.r.voteSong(this.conn, yes, fx));
   }
 
   pickOfficial(hash: string) {

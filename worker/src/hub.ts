@@ -244,6 +244,8 @@ export class Hub extends DurableObject<Env> {
         return this.run((fx) => r.setLevelStatus(c, (a0 ?? {}) as never, fx));
       case "VoteSide":
         return this.run((fx) => r.voteSide(c, int(args[0], -1), fx));
+      case "VoteSong":
+        return this.run((fx) => r.voteSong(c, bool(args[0]), fx));
       case "CompleteDownload":
         return this.run((fx) =>
           r.completeDownload(c, str(args[0]), bool(args[1]), typeof args[2] === "string" ? args[2] : null, fx),

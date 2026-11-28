@@ -329,7 +329,7 @@ describe("round flow", () => {
     expect(b.state.settings.songTypes).toBe(Protocol.SongTypesBoth);
   });
 
-  it("osu! songs are only played in Mirror rooms", () => {
+  it("osu! songs are only played in Mirror and Teams rooms", () => {
     const w = new World();
     const osu = TestLevel.osu("Mania");
     const a = w.connect("A", [osu]);
@@ -344,6 +344,9 @@ describe("round flow", () => {
     expect(a.settings({ mode: Protocol.ModeMirror, maxPlayers: 2 }).ok).toBe(true);
     expect(a.pickLocal(osu).ok).toBe(true);
     expect(a.settings({ mode: Protocol.ModeTeams, maxPlayers: 2 }).ok).toBe(true);
+    expect(b.chatHas("cleared")).toBe(false); // Teams plays osu! songs too
+    expect(a.settings({ mode: Protocol.ModeTeams, maxPlayers: 2, songTypes: Protocol.SongTypesOsu }).ok).toBe(true);
+    expect(a.settings({ mode: Protocol.ModeVersus, maxPlayers: 2, songTypes: Protocol.SongTypesBoth }).ok).toBe(true);
     expect(b.chatHas("cleared")).toBe(true);
   });
 
@@ -644,7 +647,7 @@ describe("round flow", () => {
     expect(a.state.members.find((m) => m.id === b.playerId)!.levelStatus).toBe(Protocol.LevelReady);
   });
 
-  it("a stalled upload times out and the room is told", () => {
+  it("a stalled upload times out, the room is told and the pick is dropped", () => {
     const w = new World({ stallTimeoutSeconds: 5 });
     const lvl = TestLevel.create("Stuck");
     const a = w.connect("A", [lvl]);
@@ -653,7 +656,10 @@ describe("round flow", () => {
     b.join(id);
     a.pickLocal(lvl);
     w.advance(6000);
-    expect(b.latest<{ reason: string }>(Protocol.TransferFailed)!.reason).toContain("timed out");
+    // Nobody else can send it: the pick is dropped for this turn and A picks again.
+    expect(b.latest<{ reason: string }>(Protocol.SongRejected)!.reason).toContain("timed out");
+    expect(b.state.song).toBeNull();
+    expect(b.state.turnPlayerId).toBe(a.playerId);
   });
 
   it("an emptied room deletes its cached files from R2", () => {
