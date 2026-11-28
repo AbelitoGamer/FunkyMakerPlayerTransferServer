@@ -33,6 +33,7 @@ import {
   type RoundResult,
   type SongInfo,
   type SongSelection,
+  type SongVoteInfo,
   str,
   num,
   int,
@@ -150,10 +151,22 @@ export type Ticket<T> = { ok: true; ticket: T } | { ok: false; error: string };
 
 // ── State types ────────────────────────────────────────────────────────────
 
+/** Who a Hello is from, as checked by the hub (Discord session token, or the local dev login). */
+export interface SessionIdentity {
+  playerId: string;
+  username: string;
+  discordUsername: string;
+  avatar: string;
+}
+
 class Session {
   playerId = "";
   username = "Player";
   colorHue = 180;
+  avatar = "";
+  /** No account: may look at the room list and leaderboards, can't create or join rooms. */
+  guest = true;
+  discordUsername = "";
   osuSkipVideo = false;
   fnfChartOnly = false;
   greeted = false;
@@ -176,6 +189,11 @@ class Room {
   progressDirty = false;
   levelsVersion = 1;
   historyVersion = 1;
+  /** A long song waiting for the lobby's OK. */
+  vote: SongVote | null = null;
+  /** Songs refused for the current turn (lobby voted no / couldn't be sent), valid while turnSeq = blockedTurn. */
+  blocked = new Set<string>();
+  blockedTurn = -1;
   constructor(
     readonly id: string,
     readonly name: string,
@@ -209,12 +227,32 @@ class Member {
   ) {}
 }
 
+/** "Play this long song?" asked to everybody playing except the picker. */
+class SongVote {
+  votes = new Map<string, boolean>();
+  constructor(
+    readonly song: SongInfo,
+    readonly pickerId: string,
+    readonly eligible: Set<string>,
+    readonly endsAt: number,
+  ) {}
+  get yes(): number {
+    let n = 0;
+    for (const v of this.votes.values()) if (v) n++;
+    return n;
+  }
+  get no(): number {
+    return this.votes.size - this.yes;
+  }
+}
+
 class MatchState {
   participants = new Map<string, Participant>();
   loaded = new Set<string>();
   firstFinishAt: number | null = null;
   names = new Map<string, string>();
   hues = new Map<string, number>();
+  avatars = new Map<string, string>();
   constructor(
     readonly info: MatchInfo,
     readonly createdAt: number,
@@ -293,6 +331,14 @@ export const CountdownMs = 4000;
 
 const HashRegex = /^[0-9a-f]{64}$/;
 
+/** What a guest (no Discord login) gets when trying to create or join a room. */
+export const GuestRoomError = "Log in with Discord to create or join rooms.";
+
+/** Only Discord CDN avatar URLs reach the clients (they download them). */
+export function safeAvatar(url: string): string {
+  return /^https:\/\/cdn\.discordapp\.com\/[A-Za-z0-9_./?=-]{1,200}$/.test(url) ? url : "";
+}
+
 function cacheKeyOf(hash: string, variant: string): string {
   return variant === Protocol.VariantFull ? hash : `${hash}:${variant}`;
 }
@@ -346,7 +392,11 @@ export class RoomRegistry {
   // Sessions
   // ══════════════════════════════════════════════════════════════════════
 
-  hello(connectionId: string, raw: Partial<HelloRequest>, fx: Effects): HelloResult {
+  /**
+   * identity = the account the hub verified (Discord session token or dev login); null = guest. The
+   * request's own playerId / username are not trusted any more (protocol 5).
+   */
+  hello(connectionId: string, raw: Partial<HelloRequest>, fx: Effects, identity: SessionIdentity | null = null): HelloResult {
     const request = raw ?? {};
     const protocolVersion = int(request.protocolVersion);
     const base: HelloResult = {
@@ -359,6 +409,10 @@ export class RoomRegistry {
       supportsChunkedUpload: false,
       supportsFnfChartOnly: false,
       uploadChunkBytes: 0,
+      guest: true,
+      account: null,
+      sessionToken: "",
+      authError: "",
     };
     if (protocolVersion !== Protocol.Version) {
       return {
@@ -367,18 +421,22 @@ export class RoomRegistry {
       };
     }
 
-    let playerId = clean(str(request.playerId), 64);
-    if (playerId.length === 0) playerId = "conn-" + connectionId;
+    const playerId = identity ? clean(identity.playerId, 64) : "guest-" + connectionId;
     let s = this.sessions.get(connectionId);
     if (!s) {
       s = new Session(connectionId);
       this.sessions.set(connectionId, s);
     }
+    // Logged out / switched account on this connection: leave the room first (it belongs to the old player).
+    if (s.member && (identity === null || s.playerId !== playerId)) this.removeMember(s.member, fx, `${s.username} left.`);
     const osuSkipVideo = bool(request.osuSkipVideo);
     const fnfChartOnly = bool(request.fnfChartOnly);
     const variantPrefChanged = s.osuSkipVideo !== osuSkipVideo || s.fnfChartOnly !== fnfChartOnly;
     s.playerId = playerId;
-    s.username = cleanName(str(request.username), "Player");
+    s.guest = identity === null;
+    s.username = identity ? cleanName(identity.username, "Player") : "Guest";
+    s.discordUsername = identity ? clean(identity.discordUsername, 40) : "";
+    s.avatar = identity ? safeAvatar(identity.avatar) : "";
     s.colorHue = clamp(int(request.colorHue, 180), 0, 360);
     s.osuSkipVideo = osuSkipVideo;
     s.fnfChartOnly = fnfChartOnly;
@@ -402,13 +460,17 @@ export class RoomRegistry {
       supportsChunkedUpload: true,
       supportsFnfChartOnly: true,
       uploadChunkBytes: this.uploadChunkBytes,
+      guest: s.guest,
+      account: s.guest
+        ? null
+        : { playerId: s.playerId, username: s.username, discordUsername: s.discordUsername, avatar: s.avatar, colorHue: s.colorHue },
     };
   }
 
-  /** The session's player id/name/hue after a successful Hello (for the leaderboard's user directory). */
-  profileOf(connectionId: string): { playerId: string; username: string; colorHue: number } | null {
+  /** The session's player after a successful Hello (for the leaderboard's user directory); null for guests. */
+  profileOf(connectionId: string): { playerId: string; username: string; colorHue: number; avatar: string } | null {
     const s = this.sessions.get(connectionId);
-    return s && s.greeted ? { playerId: s.playerId, username: s.username, colorHue: s.colorHue } : null;
+    return s && s.greeted && !s.guest ? { playerId: s.playerId, username: s.username, colorHue: s.colorHue, avatar: s.avatar } : null;
   }
 
   ping(connectionId: string, clientTimestamp: number): PongPacket {
@@ -446,6 +508,7 @@ export class RoomRegistry {
           id: m.session.playerId,
           username: m.session.username,
           colorHue: m.session.colorHue,
+          avatar: m.session.avatar,
         })),
         playerCount: r.members.length,
         maxPlayers: r.settings.maxPlayers,
@@ -456,6 +519,7 @@ export class RoomRegistry {
     const request = raw ?? {};
     const s = this.sessions.get(connectionId);
     if (!s || !s.greeted) return OpResult.fail("Not connected.");
+    if (s.guest) return OpResult.fail(GuestRoomError);
 
     if (s.member) this.removeMember(s.member, fx, `${s.username} left.`);
 
@@ -479,6 +543,7 @@ export class RoomRegistry {
     const roomId = str(request.roomId).trim().toUpperCase();
     const s = this.sessions.get(connectionId);
     if (!s || !s.greeted) return OpResult.fail("Not connected.");
+    if (s.guest) return OpResult.fail(GuestRoomError);
     const room = this.rooms.get(roomId);
     if (!room) return OpResult.fail("That room doesn't exist any more.");
     if (s.member?.room === room) return OpResult.success(room.id);
@@ -569,6 +634,7 @@ export class RoomRegistry {
     room.settings = next;
     room.levelsVersion++;
     this.addSystemChat(room, `Host changed the settings: ${changes.join(", ")}.`, fx);
+    this.cancelVote(room, fx, "The song vote was cancelled by the new settings.");
 
     if (old.songSelection !== next.songSelection && next.songSelection === Protocol.SelectHost && room.host)
       room.turnSeq = room.host.joinSeq;
@@ -626,6 +692,7 @@ export class RoomRegistry {
         playerId: m.session.playerId,
         username: m.session.username,
         colorHue: m.session.colorHue,
+        avatar: m.session.avatar,
         text: cleaned,
         system: false,
         timestamp: now,
@@ -642,6 +709,11 @@ export class RoomRegistry {
     m.ready = false;
     m.vote = -1;
     this.addSystemChat(room, spectate ? `${m.session.username} will spectate.` : `${m.session.username} will play.`, fx);
+    if (room.vote?.pickerId === m.session.playerId && spectate) this.cancelVote(room, fx, "The song vote was cancelled.");
+    else if (room.vote && spectate && room.vote.eligible.delete(m.session.playerId)) {
+      room.vote.votes.delete(m.session.playerId);
+      if (room.vote.votes.size >= room.vote.eligible.size) this.resolveVote(room, fx);
+    }
 
     if (
       spectate &&
@@ -673,9 +745,11 @@ export class RoomRegistry {
     this.ensureTurn(room);
     if (room.turnMember !== m) return OpResult.fail("It's not your turn to pick.");
     if (room.song) return OpResult.fail("A song was already picked for this round. It can't be changed.");
+    if (room.vote) return OpResult.fail("The lobby is still voting on your last pick.");
 
     const hash = str(selection.hash).trim().toLowerCase();
     if (!HashRegex.test(hash)) return OpResult.fail("Invalid level.");
+    if (this.isBlocked(room, hash)) return OpResult.fail("That song can't be picked again this turn. Pick another one.");
 
     let song: SongInfo;
     const source = str(selection.source, Protocol.SourceOfficial);
@@ -704,8 +778,8 @@ export class RoomRegistry {
         return OpResult.fail(
           entry.kind !== Protocol.KindOsu
             ? "This room only plays osu!mania songs."
-            : room.settings.mode !== Protocol.ModeMirror
-              ? "osu!mania songs can only be played in Mirror mode."
+            : !osuModeAllowed(room.settings.mode)
+              ? "osu!mania songs can only be played in Mirror or Teams mode."
               : "This room doesn't play osu!mania songs.",
         );
       if (!this.isPickable(room, hash)) return OpResult.fail("This room only allows official levels and the host's levels.");
@@ -721,14 +795,100 @@ export class RoomRegistry {
         setName: entry.setName,
         difficulty: entry.difficulty,
         sizeNoVideo: entry.sizeNoVideo,
+        duration: entry.duration,
       };
     } else {
       return OpResult.fail("Unknown level source.");
     }
 
     song.stars = clamp(num(selection.stars), 0, 99);
+    song.duration = Math.max(song.duration, cleanDuration(selection.duration));
     song.pickedBy = m.session.playerId;
 
+    // Long songs need the lobby's OK first (everybody else playing votes; nobody else = no vote).
+    if (song.duration >= Protocol.LongSongSeconds) {
+      const eligible = new Set(activePlayers(room).filter((x) => x !== m).map((x) => x.session.playerId));
+      if (eligible.size > 0) {
+        room.vote = new SongVote(song, m.session.playerId, eligible, this.now + Protocol.SongVoteMs);
+        this.addSystemChat(
+          room,
+          `${m.session.username} wants to play ${song.name} (${formatDuration(song.duration)}). It's a long song: vote whether to play it.`,
+          fx,
+        );
+        this.broadcastRoom(room, fx);
+        return OpResult.success(room.id);
+      }
+    }
+
+    this.acceptSong(room, song, m, fx);
+    return OpResult.success(room.id);
+  }
+
+  /** Long-song vote: yes / no from a player who was asked. */
+  voteSong(connectionId: string, yes: boolean, fx: Effects): OpResult {
+    const m = this.tryMember(connectionId);
+    if (!m) return OpResult.fail("You're not in a room.");
+    const room = m.room;
+    const vote = room.vote;
+    if (!vote) return OpResult.fail("There is no song vote right now.");
+    if (!vote.eligible.has(m.session.playerId)) return OpResult.fail("You aren't voting on this song.");
+    vote.votes.set(m.session.playerId, yes);
+    if (vote.votes.size >= vote.eligible.size) this.resolveVote(room, fx);
+    else this.broadcastRoom(room, fx);
+    return OpResult.success(room.id);
+  }
+
+  /** Closes the vote: more yes than no (or nobody voted) = the song is played; otherwise it's rejected. */
+  private resolveVote(room: Room, fx: Effects): void {
+    const vote = room.vote;
+    if (!vote) return;
+    room.vote = null;
+    const picker = room.members.find((x) => x.session.playerId === vote.pickerId);
+    if (!picker || room.turnMember !== picker || room.phase !== Protocol.PhaseLobby || room.song) {
+      this.broadcastRoom(room, fx);
+      return;
+    }
+    const yes = vote.yes,
+      no = vote.no;
+    if (yes > no || (yes === 0 && no === 0)) {
+      this.addSystemChat(room, `The lobby accepted ${vote.song.name} (${yes} yes, ${no} no).`, fx);
+      this.acceptSong(room, vote.song, picker, fx);
+    } else {
+      this.rejectPick(room, vote.song, `The lobby rejected ${vote.song.name} (${yes} yes, ${no} no).`, fx);
+    }
+  }
+
+  /** Drops an open vote (picker left / spectates, settings changed). */
+  private cancelVote(room: Room, fx: Effects, reason: string | null): void {
+    if (!room.vote) return;
+    room.vote = null;
+    if (reason) this.addSystemChat(room, reason, fx);
+  }
+
+  /**
+   * The pick is off for this turn (voted down, or the level couldn't be sent): the song is blocked
+   * until the turn moves on and the picker is asked for another one.
+   */
+  private rejectPick(room: Room, song: SongInfo, reason: string, fx: Effects): void {
+    if (room.song?.hash === song.hash) this.clearSong(room, fx);
+    if (room.blockedTurn !== room.turnSeq) room.blocked.clear(); // a list from another turn
+    room.blockedTurn = room.turnSeq;
+    room.blocked.add(song.hash);
+    room.levelsVersion++; // "pickable" changes
+    const picker = room.members.find((x) => x.session.playerId === song.pickedBy);
+    const again = picker && room.turnMember === picker ? ` ${picker.session.username}, pick another song.` : "";
+    this.addSystemChat(room, reason + again, fx);
+    const packet = { hash: song.hash, name: song.name, reason, pickedBy: song.pickedBy };
+    for (const x of room.members) fx.send(x.session.connectionId, Protocol.SongRejected, packet);
+    this.broadcastRoom(room, fx);
+  }
+
+  /** True when the song was refused for the current turn (the list is dropped once the turn moves on). */
+  private isBlocked(room: Room, hash: string): boolean {
+    return room.blockedTurn === room.turnSeq && room.blocked.has(hash);
+  }
+
+  private acceptSong(room: Room, song: SongInfo, m: Member, fx: Effects): void {
     room.song = song;
     room.phase = Protocol.PhaseSongSelected;
     this.resetReady(room, false);
@@ -741,7 +901,6 @@ export class RoomRegistry {
     if (song.source === Protocol.SourceLocal) this.startTransfer(room, fx);
     this.tryAdvanceRound(room, fx);
     this.broadcastRoom(room, fx);
-    return OpResult.success(room.id);
   }
 
   setReady(connectionId: string, ready: boolean, fx: Effects): OpResult {
@@ -1201,6 +1360,8 @@ export class RoomRegistry {
         }
       }
 
+      if (room.vote && now >= room.vote.endsAt) this.resolveVote(room, fx);
+
       if (room.progressDirty && now - room.lastProgressBroadcast >= this.options.progressIntervalMs) this.broadcastRoom(room, fx);
 
       for (const [key, file] of [...room.cache]) {
@@ -1286,6 +1447,14 @@ export class RoomRegistry {
       }
     }
 
+    if (room.vote) {
+      if (room.vote.pickerId === playerId) this.cancelVote(room, fx, "Their song vote was cancelled.");
+      else if (room.vote.eligible.delete(playerId)) {
+        room.vote.votes.delete(playerId);
+        if (room.vote.votes.size >= room.vote.eligible.size) this.resolveVote(room, fx);
+      }
+    }
+
     if (room.phase === Protocol.PhaseLobby || room.phase === Protocol.PhaseSongSelected) {
       if (room.song && room.song.pickedBy === playerId) {
         this.clearSong(room, fx);
@@ -1338,6 +1507,7 @@ export class RoomRegistry {
   }
 
   private isPickable(room: Room, hash: string): boolean {
+    if (this.isBlocked(room, hash)) return false;
     const holders = room.settings.allowGuestLocalLevels ? room.members : room.members.slice(0, 1);
     for (const x of holders) {
       const e = x.levels.get(hash);
@@ -1415,7 +1585,9 @@ export class RoomRegistry {
         const team0 = Math.trunc(shuffled.length / 2) + (shuffled.length % 2 === 1 ? this.randomInt(2) : 0);
         shuffled.forEach((p, i) => {
           const team = i < team0 ? 0 : 1;
-          info.players.push({ playerId: p.session.playerId, side: team, team });
+          // osu! songs have a single chart: both teams play it (side Player), only the teams differ.
+          const side = room.song!.kind === Protocol.KindOsu ? Protocol.SidePlayer : team;
+          info.players.push({ playerId: p.session.playerId, side, team });
         });
         break;
       }
@@ -1444,6 +1616,7 @@ export class RoomRegistry {
     for (const p of players) {
       match.names.set(p.session.playerId, p.session.username);
       match.hues.set(p.session.playerId, p.session.colorHue);
+      match.avatars.set(p.session.playerId, p.session.avatar);
     }
     room.match = match;
     room.phase = Protocol.PhaseLoading;
@@ -1500,6 +1673,7 @@ export class RoomRegistry {
         playerId: p.assignment.playerId,
         username: name,
         colorHue: hue,
+        avatar: member?.session.avatar ?? match.avatars.get(p.assignment.playerId) ?? "",
         side: p.assignment.side,
         team: p.assignment.team,
         score: 0,
@@ -1550,6 +1724,10 @@ export class RoomRegistry {
     for (const t of this.roomTransfers(room)) this.endTransfer(t, fx);
     room.match = null;
     room.song = null;
+    if (room.blocked.size > 0) {
+      room.blocked.clear();
+      room.levelsVersion++;
+    }
     room.phase = Protocol.PhaseLobby;
     this.resetReady(room, false);
     for (const m of room.members) this.updateMemberLevelState(m);
@@ -1601,6 +1779,7 @@ export class RoomRegistry {
 
     const variants = variant !== null ? [variant] : [...new Set(needers.map((m) => variantFor(m, song)))];
     for (const v of variants) {
+      if (room.song !== song && room.match?.info.song !== song) return; // the pick was dropped
       if ([...this.transfers.values()].some((x) => x.room === room && x.hash === song.hash && x.variant === v)) continue;
       this.startVariant(room, song, v, fx, excludeUploader);
     }
@@ -1622,6 +1801,10 @@ export class RoomRegistry {
     const uploader =
       holders.find((m) => m.session.playerId === song.pickedBy) ?? holders.find((m) => m === room.host) ?? holders[0];
     if (!uploader) {
+      if (room.phase === Protocol.PhaseSongSelected && room.song === song) {
+        this.rejectPick(room, song, `Couldn't send ${song.name}: nobody in the room can send it.`, fx);
+        return;
+      }
       for (const m of room.members) {
         if (this.hasSongForCurrentMode(m, song) || variantFor(m, song) !== variant) continue;
         m.levelState = Protocol.LevelFailed;
@@ -1706,6 +1889,7 @@ export class RoomRegistry {
   }
 
   private failTransfer(t: Transfer, fx: Effects, reason: string, tryNextHolder: boolean): void {
+    if (!this.transfers.has(t.id)) return; // already ended (the pick was dropped meanwhile)
     const failedUploader = t.uploaderId;
     this.endTransfer(t, fx);
     const room = t.room;
@@ -1720,6 +1904,10 @@ export class RoomRegistry {
       room.members.some((m) => m.levels.has(t.hash) && m.session.playerId !== failedUploader)
     ) {
       this.startTransfer(room, fx, failedUploader, t.variant);
+    } else if (song && song.hash === t.hash && room.phase === Protocol.PhaseSongSelected && room.song === song) {
+      // Nobody could send the picked song: it's off for this turn and the picker picks another one.
+      this.rejectPick(room, song, `Couldn't send ${t.entry.name}: ${reason}`, fx);
+      return;
     } else {
       for (const m of room.members) {
         const lacks = song ? !this.hasSongForCurrentMode(m, song) : !m.levels.has(t.hash);
@@ -1759,7 +1947,7 @@ export class RoomRegistry {
   }
 
   private addSystemChat(room: Room, text: string, fx: Effects): void {
-    this.addChat(room, { playerId: "", username: "", colorHue: 180, text, system: true, timestamp: this.now }, fx);
+    this.addChat(room, { playerId: "", username: "", colorHue: 180, avatar: "", text, system: true, timestamp: this.now }, fx);
   }
 
   private addChat(room: Room, msg: ChatMessage, fx: Effects): void {
@@ -1776,6 +1964,12 @@ export class RoomRegistry {
     if (!this.rooms.has(room.id)) return;
     room.lastProgressBroadcast = this.now;
     room.progressDirty = false;
+    if (room.blocked.size > 0 && room.blockedTurn !== room.turnSeq) {
+      room.blocked.clear(); // the turn moved on: those songs can be picked again
+      room.levelsVersion++;
+    }
+    const blockedHashes = room.blockedTurn === room.turnSeq ? [...room.blocked] : [];
+    const vote = room.vote;
     const blocker = this.startBlocker(room);
     const turn = room.turnMember;
     const inMatch = room.phase === Protocol.PhaseLoading || room.phase === Protocol.PhasePlaying;
@@ -1799,6 +1993,7 @@ export class RoomRegistry {
         id,
         username: m.session.username,
         colorHue: m.session.colorHue,
+        avatar: m.session.avatar,
         isHost: m === room.host,
         status,
         spectate: m.spectate,
@@ -1843,6 +2038,7 @@ export class RoomRegistry {
             setName: src.setName,
             difficulty: src.difficulty,
             sizeNoVideo: src.sizeNoVideo,
+            duration: src.duration,
             youHave: own !== undefined,
             holders: room.members.filter((o) => o !== member && o.levels.has(hash)).map((o) => o.session.playerId),
             pickable: pick,
@@ -1877,6 +2073,18 @@ export class RoomRegistry {
         startBlocker: blocker ?? "",
         levels,
         history,
+        songVote: vote
+          ? ({
+              song: vote.song,
+              yes: vote.yes,
+              no: vote.no,
+              eligible: [...vote.eligible],
+              voted: [...vote.votes.keys()],
+              endsAt: vote.endsAt,
+              yourVote: vote.votes.has(member.session.playerId) ? (vote.votes.get(member.session.playerId) ? 1 : 0) : -1,
+            } satisfies SongVoteInfo)
+          : null,
+        blockedHashes,
       };
       fx.send(member.session.connectionId, Protocol.RoomState, packet);
     }
@@ -1905,8 +2113,8 @@ export class RoomRegistry {
       typesIn === Protocol.SongTypesFnf || typesIn === Protocol.SongTypesOsu || typesIn === Protocol.SongTypesBoth
         ? typesIn
         : Protocol.SongTypesBoth;
-    if (types === Protocol.SongTypesOsu && mode !== Protocol.ModeMirror)
-      return { error: "osu!mania only rooms must use Mirror mode (osu! songs have a single strumline)." };
+    if (types === Protocol.SongTypesOsu && !osuModeAllowed(mode))
+      return { error: "osu!mania only rooms must use Mirror or Teams mode (osu! songs have a single strumline)." };
     return {
       settings: {
         mode,
@@ -1951,6 +2159,7 @@ export class RoomRegistry {
         setName: "",
         difficulty: "",
         sizeNoVideo: 0,
+        duration: cleanDuration(l.duration),
       };
       if (osu) {
         entry.kind = Protocol.KindOsu;
@@ -2003,8 +2212,24 @@ function names(list: Member[]): string {
   return list.length <= 2 ? list.map((m) => m.session.username).join(" and ") : `${list.length} players`;
 }
 
+/** osu! songs have one strumline: Mirror (everybody plays it) or Teams (both teams play it, team averages decide). */
+function osuModeAllowed(mode: string): boolean {
+  return mode === Protocol.ModeMirror || mode === Protocol.ModeTeams;
+}
+
+/** Seconds from a client (0 = unknown; capped at 3 hours). */
+function cleanDuration(v: unknown): number {
+  const n = num(v);
+  return Number.isFinite(n) && n > 0 ? Math.min(n, 3 * 3600) : 0;
+}
+
+function formatDuration(seconds: number): string {
+  const s = Math.round(seconds);
+  return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
+}
+
 function kindAllowed(room: Room, kind: string): boolean {
-  if (kind === Protocol.KindOsu && room.settings.mode !== Protocol.ModeMirror) return false;
+  if (kind === Protocol.KindOsu && !osuModeAllowed(room.settings.mode)) return false;
   switch (room.settings.songTypes) {
     case Protocol.SongTypesFnf:
       return kind !== Protocol.KindOsu;
@@ -2027,6 +2252,7 @@ function entryFor(song: SongInfo): LevelEntry {
     setName: song.setName,
     difficulty: song.difficulty,
     sizeNoVideo: song.sizeNoVideo,
+    duration: song.duration,
   };
 }
 
@@ -2055,6 +2281,7 @@ function emptySong(): SongInfo {
     setName: "",
     difficulty: "",
     sizeNoVideo: 0,
+    duration: 0,
   };
 }
 

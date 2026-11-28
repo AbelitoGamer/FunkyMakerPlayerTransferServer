@@ -13,6 +13,7 @@ export interface LeaderboardEntry {
   username: string;
   avatarIndex: number;
   colorHue: number;
+  avatar: string;
   totalScore: number;
   wins: number;
   losses: number;
@@ -30,6 +31,7 @@ export interface PlayerMatchData {
   username: string;
   avatarIndex: number;
   colorHue: number;
+  avatar: string;
   score: number;
   accuracy: number;
   maxCombo: number;
@@ -59,6 +61,7 @@ export interface UserDirectoryEntry {
   username: string;
   avatarIndex: number;
   colorHue: number;
+  avatar: string;
   eloRating: number;
   wins: number;
   losses: number;
@@ -70,6 +73,7 @@ export interface ConnectedProfile {
   playerId: string;
   username: string;
   colorHue: number;
+  avatar: string;
   avatarIndex?: number;
   clientVersion?: string;
 }
@@ -82,6 +86,7 @@ function emptyPlayerData(): PlayerMatchData {
     username: "",
     avatarIndex: 0,
     colorHue: 180,
+    avatar: "",
     score: 0,
     accuracy: 0,
     maxCombo: 0,
@@ -104,6 +109,7 @@ export function toEntry(raw: unknown): LeaderboardEntry | null {
     username: str(r.username, "Player"),
     avatarIndex: int(r.avatarIndex),
     colorHue: int(r.colorHue, 180),
+    avatar: str(r.avatar),
     totalScore: num(r.totalScore),
     wins: int(r.wins),
     losses: int(r.losses),
@@ -124,6 +130,7 @@ function toPlayerData(raw: unknown): PlayerMatchData {
     username: str(r.username),
     avatarIndex: int(r.avatarIndex),
     colorHue: int(r.colorHue, 180),
+    avatar: str(r.avatar),
     score: num(r.score),
     accuracy: num(r.accuracy),
     maxCombo: int(r.maxCombo),
@@ -233,6 +240,7 @@ export class LeaderboardBook {
         playerId: p.playerId,
         username: p.username,
         colorHue: p.colorHue,
+        avatar: p.avatar,
         score: p.score,
         accuracy: p.accuracy,
         maxCombo: p.maxCombo,
@@ -307,6 +315,7 @@ export class LeaderboardBook {
       username: p.username.trim() || "Player",
       avatarIndex: p.avatarIndex,
       colorHue: p.colorHue,
+      avatar: p.avatar,
       totalScore: 0,
       wins: 0,
       losses: 0,
@@ -326,6 +335,7 @@ export class LeaderboardBook {
     if (!playerId) return null;
     const cleanName = (profile.username ?? "").trim() || "Player";
     const avatarIndex = profile.avatarIndex ?? 0;
+    const avatar = profile.avatar ?? "";
     let changedPlayer: LeaderboardEntry | null = null;
     let elo = 1000,
       wins = 0,
@@ -337,10 +347,11 @@ export class LeaderboardBook {
       wins = existing.wins;
       losses = existing.losses;
       draws = existing.draws;
-      if (existing.username !== cleanName || existing.colorHue !== profile.colorHue || existing.avatarIndex !== avatarIndex) {
+      if (existing.username !== cleanName || existing.colorHue !== profile.colorHue || existing.avatarIndex !== avatarIndex || existing.avatar !== avatar) {
         existing.username = cleanName;
         existing.colorHue = profile.colorHue;
         existing.avatarIndex = avatarIndex;
+        existing.avatar = avatar;
         changedPlayer = clone(existing);
       }
     }
@@ -349,6 +360,7 @@ export class LeaderboardBook {
       username: cleanName,
       avatarIndex,
       colorHue: profile.colorHue,
+      avatar,
       eloRating: elo,
       wins,
       losses,
@@ -371,6 +383,7 @@ export class LeaderboardBook {
           username: player.username.trim() || "Player",
           avatarIndex: player.avatarIndex,
           colorHue: player.colorHue,
+          avatar: player.avatar,
           eloRating: 1000,
           wins: 0,
           losses: 0,
@@ -393,6 +406,7 @@ export class LeaderboardBook {
         username: e.username,
         avatarIndex: e.avatarIndex,
         colorHue: e.colorHue,
+        avatar: e.avatar,
         eloRating: e.eloRating,
         wins: e.wins,
         losses: e.losses,
@@ -406,6 +420,7 @@ export class LeaderboardBook {
         existing.username = live.username;
         existing.avatarIndex = live.avatarIndex;
         existing.colorHue = live.colorHue;
+        if (live.avatar) existing.avatar = live.avatar;
         existing.lastSeenTimestamp = Math.max(existing.lastSeenTimestamp, live.lastSeenTimestamp);
       } else {
         users.set(live.playerId, clone(live));
@@ -440,4 +455,5 @@ function applyMatchStats(player: LeaderboardEntry, data: PlayerMatchData, won: b
   if (data.accuracy > player.bestAccuracy) player.bestAccuracy = data.accuracy;
   if (data.username.trim()) player.username = data.username.trim();
   player.colorHue = data.colorHue;
+  if (data.avatar) player.avatar = data.avatar;
 }

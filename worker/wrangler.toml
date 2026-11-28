@@ -36,9 +36,13 @@ DOWNLOAD_COMPLETION_GRACE_SECONDS = "600"
 LOADING_TIMEOUT_SECONDS = "180"
 CACHE_MINUTES = "15"
 PROGRESS_INTERVAL_MS = "200"
-TESTING_OPEN = "true"
+TESTING_OPEN = "false"
 TESTING_MESSAGE = ""
 # Where the room server is created the first time (empty = near the first player who connects).
 # One of: wnam, enam, sam, weur, eeur, apac, oc, afr, me
 HUB_LOCATION_HINT = ""
+# Discord login (protocol 5): the application id is public. Secrets (npx wrangler secret put ...):
+#   DISCORD_CLIENT_SECRET, SESSION_SECRET (random; changing it logs everybody out).
+# Redirect registered on Discord: https://<host>/auth/discord/callback (+ http://127.0.0.1:8787/... for wrangler dev).
+DISCORD_CLIENT_ID = "1576195997246169191"
 # Secret (not a var): npx wrangler secret put ADMIN_TOKEN  — enables POST /api/admin/import

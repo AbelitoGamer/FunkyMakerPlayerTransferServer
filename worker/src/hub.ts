@@ -18,9 +18,11 @@
 // Method names, arguments and payloads are the old hub's (camelCase; any casing accepted).
 
 import { DurableObject } from "cloudflare:workers";
+import { signSession } from "./accounts";
+import { refreshProfileIfStale, resolveHello } from "./auth";
 import { type Env, leaderboardStub, registryOptions } from "./env";
 import { findOfficialByHash, loadOfficialLevels } from "./official";
-import { Protocol, normalizeKeys, str, int, bool, num } from "./protocol";
+import { Protocol, normalizeKeys, str, int, bool, num, type HelloRequest } from "./protocol";
 import {
   Effects,
   RoomRegistry,
@@ -200,13 +202,18 @@ export class Hub extends DurableObject<Env> {
     switch (method) {
       // Session
       case "Hello": {
-        const result = this.run((fx) => r.hello(c, (a0 ?? {}) as never, fx));
-        const profile = r.profileOf(c);
-        if (result.ok && profile) {
-          leaderboardStub(this.env)
-            .upsertConnectedProfile({ ...profile, clientVersion: str(a0?.clientVersion) })
-            .catch((e) => console.log(`[Hub] profile upsert failed: ${e}`));
+        // Protocol 5: who this is comes from the session token (auth.ts), not from the request.
+        const request = (a0 ?? {}) as Partial<HelloRequest>;
+        const session = int(request.protocolVersion) === Protocol.Version ? await resolveHello(this.env, request) : null;
+        const result = this.run((fx) => r.hello(c, request, fx, session?.identity ?? null));
+        if (!result.ok || !session) return result;
+        result.authError = session.authError;
+        if (session.account && this.env.SESSION_SECRET) {
+          result.sessionToken = await signSession(this.env.SESSION_SECRET, session.account.id, Date.now());
+          this.background(refreshProfileIfStale(this.env, session.account), "profile refresh");
         }
+        const profile = r.profileOf(c);
+        if (profile) this.background(leaderboardStub(this.env).upsertConnectedProfile({ ...profile, clientVersion: str(a0?.clientVersion) }), "profile upsert");
         return result;
       }
       case "Ping": {
@@ -244,6 +251,8 @@ export class Hub extends DurableObject<Env> {
         return this.run((fx) => r.setLevelStatus(c, (a0 ?? {}) as never, fx));
       case "VoteSide":
         return this.run((fx) => r.voteSide(c, int(args[0], -1), fx));
+      case "VoteSong":
+        return this.run((fx) => r.voteSong(c, bool(args[0]), fx));
       case "CompleteDownload":
         return this.run((fx) =>
           r.completeDownload(c, str(args[0]), bool(args[1]), typeof args[2] === "string" ? args[2] : null, fx),

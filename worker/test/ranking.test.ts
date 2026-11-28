@@ -11,6 +11,7 @@ const pr = (o: Partial<PlayerResult>): PlayerResult => ({
   playerId: "",
   username: "",
   colorHue: 180,
+  avatar: "",
   side: 0,
   team: -1,
   score: 0,
@@ -93,7 +94,8 @@ describe("elo", () => {
     expect(top[0].playerId).toBe(a.playerId);
     expect(top[0].wins).toBe(1);
     expect(top[1].losses).toBe(1);
-    lb.upsertConnectedProfile({ playerId: b.playerId, username: "Renamed", colorHue: 10 });
+    lb.upsertConnectedProfile({ playerId: b.playerId, username: "Renamed", colorHue: 10, avatar: "https://cdn.discordapp.com/embed/avatars/2.png" });
+    expect(lb.userById(b.playerId)!.avatar).toContain("avatars/2.png");
     expect(lb.userById(b.playerId)!.username).toBe("Renamed");
     expect(lb.totalKnownUsers()).toBe(2);
   });

@@ -4,7 +4,7 @@
 import { describe, expect, it } from "vitest";
 import { Protocol, type MatchInfo, type RoundResult, type TransferDownloadPacket, type TransferUploadPacket } from "../src/protocol";
 import { SilenceTimeoutMs, CountdownMs, Effects } from "../src/registry";
-import { TestLevel, World, sha256, type TestPlayer } from "./helpers";
+import { TestLevel, World, identityOf, sha256, type TestPlayer } from "./helpers";
 
 const upload = (p: TestPlayer, pred: (u: TransferUploadPacket) => boolean = () => true) =>
   p.all<TransferUploadPacket>(Protocol.TransferUpload).filter(pred).at(-1)!;
@@ -65,7 +65,7 @@ describe("session / browser", () => {
   it("follows MaxRoomMembers for the player limit (default 8)", () => {
     const w = new World({ maxRoomMembers: 12 });
     const a = w.connect("A");
-    expect(w.run((fx) => w.registry.hello(a.conn, { playerId: a.playerId, username: "A", protocolVersion: Protocol.Version }, fx)).maxRoomPlayers).toBe(12);
+    expect(w.run((fx) => w.registry.hello(a.conn, { protocolVersion: Protocol.Version }, fx, identityOf(a.playerId, "A"))).maxRoomPlayers).toBe(12);
     expect(w.run((fx) => w.registry.createRoom(a.conn, { settings: { maxPlayers: 13 } }, fx)).ok).toBe(false);
     a.create({ maxPlayers: 12 });
     expect(a.state.settings.maxPlayers).toBe(12);
@@ -84,7 +84,7 @@ describe("session / browser", () => {
     // Same player id on a new connection.
     const b2 = w.connect("B");
     (b2 as { playerId: string }).playerId = b.playerId;
-    w.run((fx) => w.registry.hello(b2.conn, { playerId: b.playerId, username: "B", protocolVersion: Protocol.Version }, fx));
+    w.run((fx) => w.registry.hello(b2.conn, { protocolVersion: Protocol.Version }, fx, identityOf(b.playerId, "B")));
     b2.join(id);
     expect(b.latest(Protocol.Kicked)).toBeDefined();
     expect(b2.state.members).toHaveLength(2);
@@ -329,7 +329,7 @@ describe("round flow", () => {
     expect(b.state.settings.songTypes).toBe(Protocol.SongTypesBoth);
   });
 
-  it("osu! songs are only played in Mirror rooms", () => {
+  it("osu! songs are only played in Mirror and Teams rooms", () => {
     const w = new World();
     const osu = TestLevel.osu("Mania");
     const a = w.connect("A", [osu]);
@@ -344,6 +344,9 @@ describe("round flow", () => {
     expect(a.settings({ mode: Protocol.ModeMirror, maxPlayers: 2 }).ok).toBe(true);
     expect(a.pickLocal(osu).ok).toBe(true);
     expect(a.settings({ mode: Protocol.ModeTeams, maxPlayers: 2 }).ok).toBe(true);
+    expect(b.chatHas("cleared")).toBe(false); // Teams plays osu! songs too
+    expect(a.settings({ mode: Protocol.ModeTeams, maxPlayers: 2, songTypes: Protocol.SongTypesOsu }).ok).toBe(true);
+    expect(a.settings({ mode: Protocol.ModeVersus, maxPlayers: 2, songTypes: Protocol.SongTypesBoth }).ok).toBe(true);
     expect(b.chatHas("cleared")).toBe(true);
   });
 
@@ -644,7 +647,7 @@ describe("round flow", () => {
     expect(a.state.members.find((m) => m.id === b.playerId)!.levelStatus).toBe(Protocol.LevelReady);
   });
 
-  it("a stalled upload times out and the room is told", () => {
+  it("a stalled upload times out, the room is told and the pick is dropped", () => {
     const w = new World({ stallTimeoutSeconds: 5 });
     const lvl = TestLevel.create("Stuck");
     const a = w.connect("A", [lvl]);
@@ -653,7 +656,10 @@ describe("round flow", () => {
     b.join(id);
     a.pickLocal(lvl);
     w.advance(6000);
-    expect(b.latest<{ reason: string }>(Protocol.TransferFailed)!.reason).toContain("timed out");
+    // Nobody else can send it: the pick is dropped for this turn and A picks again.
+    expect(b.latest<{ reason: string }>(Protocol.SongRejected)!.reason).toContain("timed out");
+    expect(b.state.song).toBeNull();
+    expect(b.state.turnPlayerId).toBe(a.playerId);
   });
 
   it("an emptied room deletes its cached files from R2", () => {

@@ -18,6 +18,13 @@ export interface Env {
   TESTING_MESSAGE?: string;
   HUB_LOCATION_HINT?: string;
   ADMIN_TOKEN?: string;
+  /** Discord application (OAuth2, scope identify). The id is a var in wrangler.toml; the rest are secrets. */
+  DISCORD_CLIENT_ID?: string;
+  DISCORD_CLIENT_SECRET?: string;
+  /** Signs the server's own session tokens (accounts.ts). Changing it logs everybody out. */
+  SESSION_SECRET?: string;
+  /** "true" only in worker/.dev.vars: Hello without a token logs in as "dev-<playerId>" (two windows, no Discord). */
+  DEV_AUTH?: string;
 }
 
 export const SERVER_VERSION = "1.0.0-workers";

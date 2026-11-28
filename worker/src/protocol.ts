@@ -4,11 +4,13 @@
 
 export const Protocol = {
   /**
+   * 5 = Discord accounts: Hello carries a session token (without one the connection is a guest, who
+   *     can't create or join rooms); every player packet carries an avatar URL.
    * 4 = Cloudflare Workers server: plain WebSocket envelope instead of SignalR (see hub.ts),
    *     chunked uploads as R2 multipart parts, X-File-Hash on packed uploads.
    * 3 = osu!mania songs. 2 = room system. 1 = old pair-transfer server.
    */
-  Version: 4,
+  Version: 5,
 
   KindFnf: "fnf",
   KindOsu: "osu",
@@ -28,6 +30,8 @@ export const Protocol = {
   TransferUpload: "TransferUpload",
   TransferDownload: "TransferDownload",
   TransferFailed: "TransferFailed",
+  /** A pick was dropped (the lobby voted no, or the level couldn't be sent): the picker picks again. */
+  SongRejected: "SongRejected",
   MatchLoading: "MatchLoading",
   MatchStart: "MatchStart",
   MatchResults: "MatchResults",
@@ -75,6 +79,10 @@ export const Protocol = {
   HardMaxPlayers: 32,
   MaxRoomNameLength: 32,
   MaxChatLength: 200,
+  /** Songs at least this long (seconds) need the lobby's OK (a vote) before they are played. */
+  LongSongSeconds: 240,
+  /** How long a song vote stays open (ms); members who didn't vote are left out of the count. */
+  SongVoteMs: 30_000,
 } as const;
 
 // ── Session ────────────────────────────────────────────────────────────────
@@ -87,6 +95,21 @@ export interface HelloRequest {
   protocolVersion: number;
   osuSkipVideo: boolean;
   fnfChartOnly: boolean;
+  /** Session token from the Discord login; empty = guest. (playerId / username are ignored since protocol 5.) */
+  sessionToken: string;
+}
+
+/** The Discord account a session is logged in as. */
+export interface AccountInfo {
+  /** Discord user id (= the PlayerId everywhere). */
+  playerId: string;
+  /** Shown name: the Discord display name, or the unique username when the display name has nothing the game can draw. */
+  username: string;
+  /** Unique Discord username (lower-case). */
+  discordUsername: string;
+  /** Avatar PNG URL (cdn.discordapp.com). */
+  avatar: string;
+  colorHue: number;
 }
 
 export interface HelloResult {
@@ -99,6 +122,13 @@ export interface HelloResult {
   supportsChunkedUpload: boolean;
   supportsFnfChartOnly: boolean;
   uploadChunkBytes: number;
+  /** True for a guest (no or refused token): leaderboards and the room list only, no rooms. */
+  guest: boolean;
+  account: AccountInfo | null;
+  /** Renewed session token (valid 30 days from now): the client saves it. Empty for guests. */
+  sessionToken: string;
+  /** Why the token was refused ("expired" / "invalid"); empty otherwise. */
+  authError: string;
 }
 
 export interface OpResult {
@@ -131,6 +161,8 @@ export interface LevelEntry {
   setName: string;
   difficulty: string;
   sizeNoVideo: number;
+  /** Song length in seconds (end of the last note), 0 = unknown. */
+  duration: number;
 }
 
 export interface RoomSettings {
@@ -158,6 +190,7 @@ export interface RoomPlayerSummary {
   id: string;
   username: string;
   colorHue: number;
+  avatar: string;
 }
 
 export interface RoomSummary {
@@ -188,12 +221,15 @@ export interface SongInfo {
   setName: string;
   difficulty: string;
   sizeNoVideo: number;
+  /** Seconds, 0 = unknown. */
+  duration: number;
 }
 
 export interface RoomMember {
   id: string;
   username: string;
   colorHue: number;
+  avatar: string;
   isHost: boolean;
   status: string;
   spectate: boolean;
@@ -217,6 +253,7 @@ export interface RoomLevel {
   setName: string;
   difficulty: string;
   sizeNoVideo: number;
+  duration: number;
 }
 
 export interface MatchAssignment {
@@ -244,6 +281,7 @@ export interface PlayerResult {
   playerId: string;
   username: string;
   colorHue: number;
+  avatar: string;
   side: number;
   team: number;
   score: number;
@@ -272,6 +310,8 @@ export interface ChatMessage {
   playerId: string;
   username: string;
   colorHue: number;
+  /** Sender's avatar URL ("" for system messages). */
+  avatar: string;
   text: string;
   system: boolean;
   timestamp: number;
@@ -292,6 +332,31 @@ export interface RoomStatePacket {
   startBlocker: string;
   levels: RoomLevel[] | null;
   history: RoundResult[] | null;
+  /** A long song waiting for the lobby's vote, or null. */
+  songVote: SongVoteInfo | null;
+  /** Songs that can't be picked again this turn (rejected by the lobby or couldn't be sent). */
+  blockedHashes: string[];
+}
+
+export interface SongVoteInfo {
+  song: SongInfo;
+  yes: number;
+  no: number;
+  /** Players asked to vote (everybody playing except the picker, when the vote started). */
+  eligible: string[];
+  /** Who already voted. */
+  voted: string[];
+  /** Server time (ms) the vote closes. */
+  endsAt: number;
+  /** Your own vote: 1 yes, 0 no, -1 none. */
+  yourVote: number;
+}
+
+export interface SongRejectedPacket {
+  hash: string;
+  name: string;
+  reason: string;
+  pickedBy: string;
 }
 
 // ── Round flow ─────────────────────────────────────────────────────────────
@@ -302,6 +367,8 @@ export interface SongSelection {
   name: string;
   officialId: string;
   stars: number;
+  /** Song length in seconds as the picker's game measured it (0 = unknown). */
+  duration: number;
 }
 
 export interface LevelStatusUpdate {
