@@ -48,6 +48,17 @@ npm run sync-levels    # copy ../src/.../verified_levels into the local bucket
    ```
    `"replace": true` wipes the leaderboard, match history and user directory first (e.g. to remove test data).
 
+7. Discord login (protocol 5): create an application on the Discord Developer Portal, add the redirect
+   `https://<host>/auth/discord/callback` (and `http://127.0.0.1:8787/auth/discord/callback` for
+   `npm run dev`), put its id in `wrangler.toml` (`DISCORD_CLIENT_ID`), then
+   ```sh
+   npx wrangler secret put DISCORD_CLIENT_SECRET
+   npx wrangler secret put SESSION_SECRET     # any long random text; changing it logs everybody out
+   ```
+   For `npm run dev` put the same two in `.dev.vars`, plus `DEV_AUTH=true` (Hello without a token logs
+   in as `dev-<playerId>`: two game windows and `scripts/e2e.mjs` work without Discord). Never set
+   `DEV_AUTH` in production.
+
 Settings live in `wrangler.toml` `[vars]` (same knobs as the `Transfer__*` / `Testing__*` env vars).
 `HUB_LOCATION_HINT` chooses the region of the room server the first time it's created (e.g. `sam`
 for South America, `weur` for Europe); empty = near the first player who connects.
@@ -61,6 +72,16 @@ for South America, `weur` for Europe); empty = near the first player who connect
   it's only awake while somebody is connected.
 - **R2**: 10 GB stored, 1 M writes, 10 M reads per month, **free egress**. Files live minutes.
   Going over the free tier is billed (no hard cap): set a billing notification in the dashboard.
+
+## Discord accounts (protocol 5)
+
+`src/auth.ts` (HTTP: `POST /api/auth/start`, `GET /auth/discord`, `GET /auth/discord/callback`,
+`POST /api/auth/poll`) and `src/accounts.ts` (session tokens, display names, avatar URLs). The game
+can't receive the OAuth redirect, so the Worker does the OAuth2 code flow and the game polls for the
+result. Hello carries `sessionToken`; the server takes the PlayerId (Discord id), name and avatar from
+the account and returns a renewed token (a session ends after 30 days without playing). No token =
+guest: room list and leaderboards, no `CreateRoom` / `JoinRoom`. Accounts live in the Leaderboard
+Durable Object (`accounts`, `logins` tables); names / avatars are refreshed from Discord once a day.
 
 ## Client changes (protocol 4)
 
